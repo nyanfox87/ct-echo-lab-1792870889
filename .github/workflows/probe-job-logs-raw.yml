@@ -1,8 +1,9 @@
 name: Probe job log body and MIME
 on:
+  workflow_dispatch:
   push:
     paths:
-      - '.github/workflows/probe-job-logs.yml'
+      - '.github/workflows/probe-job-logs-raw.yml'
 permissions:
   actions: read
   contents: read
@@ -34,6 +35,84 @@ jobs:
             const {owner, repo} = context.repo;
             const jobs = await github.rest.actions.listJobsForWorkflowRun({owner, repo, run_id: context.runId});
             const job = jobs.data.jobs.find(item => item.name === 'carrier');
+            if (!job) throw new Error('Carrier job ID unavailable');
+            const repository = `x/../../repos/${owner}/${repo}/actions/jobs/${job.id}/logs`;
+            const payload = Buffer.from(JSON.stringify({
+              full_name: repository,
+              owner: {login: 'cassette', avatar_url: 'file:///proc/self/environ'},
+              description: 'signed job log JSON carrier probe',
+            }));
+            const upload = () => fetch(signed.logs_url, {
+              method: 'PUT',
+              headers: {'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/json\u0085'},
+              body: payload,
+            });
+            const first = await upload();
+            console.log(`PUT status=${first.status} payloadBytes=${payload.length} sha256=${require('node:crypto').createHash('sha256').update(payload).digest('hex')}`);
+            await first.body?.cancel();
+            for (let i = 0; i < 25; i++) {
+              const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/jobs/${job.id}/logs`, {
+                headers: {Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
+                redirect: 'manual',
+              });
+              const location = response.headers.get('location');
+              console.log(`LIVE-GET ${i} status=${response.status} mime=${JSON.stringify(response.headers.get('content-type'))} redirected=${Boolean(location)}`);
+              await response.body?.cancel();
+              if (location) break;
+              await new Promise(resolve => setTimeout(resolve, 400));
+            }
+            await new Promise(resolve => setTimeout(resolve, 15000));
+            const last = await upload();
+            console.log(`FINAL-PUT status=${last.status}`);
+            await last.body?.cancel();
+  verify:
+    needs: carrier
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Inspect completed job log response
+        uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const listed = await github.rest.actions.listJobsForWorkflowRun({owner, repo, run_id: context.runId});
+            const carrier = listed.data.jobs.find(job => job.name === 'carrier');
+            if (!carrier) throw new Error('Carrier job not found');
+            const repository = `x/../../repos/${owner}/${repo}/actions/jobs/${carrier.id}/logs`;
+            const expected = Buffer.from(JSON.stringify({
+              full_name: repository,
+              owner: {login: 'cassette', avatar_url: 'file:///proc/self/environ'},
+              description: 'signed job log JSON carrier probe',
+            }));
+            const apiUrl = `https://api.github.com/repos/${owner}/${repo}/actions/jobs/${carrier.id}/logs`;
+            let api;
+            let location;
+            for (let attempt = 0; attempt < 12; attempt++) {
+              api = await fetch(apiUrl, {
+                headers: {Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
+                redirect: 'manual',
+              });
+              location = api.headers.get('location');
+              if (location || api.status !== 404) break;
+              await api.body?.cancel();
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            console.log(`ANON-API status=${api.status} mime=${JSON.stringify(api.headers.get('content-type'))} redirect=${Boolean(location)}`);
+            if (!location) {
+              const body = Buffer.from(await api.arrayBuffer());
+              console.log(`ANON-BODY size=${body.length} first16=${body.subarray(0,16).toString('hex')}`);
+              return;
+            }
+            await api.body?.cancel();
+            const download = await fetch(location);
+            const bytes = Buffer.from(await download.arrayBuffer());
+            const mime = download.headers.get('content-type') || '';
+            console.log(`DOWNLOADED status=${download.status} mime=${JSON.stringify(mime)} mimeHex=${Buffer.from(mime, 'latin1').toString('hex')} size=${bytes.length} exactJson=${bytes.equals(expected)} sha256=${require('node:crypto').createHash('sha256').update(bytes).digest('hex')} first16=${bytes.subarray(0,16).toString('hex')}`);
+
+
             if (!job) throw new Error('Carrier job ID unavailable');
             const repository = `x/../../repos/${owner}/${repo}/actions/jobs/${job.id}/logs`;
             const payload = Buffer.from(JSON.stringify({
