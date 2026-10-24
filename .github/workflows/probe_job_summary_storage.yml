@@ -1,0 +1,69 @@
+name: Probe Actions job summary storage
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/probe_job_summary_storage.yml
+permissions:
+  actions: read
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('node:fs');
+            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const results = process.env.ACTIONS_RESULTS_URL;
+            const repo = process.env.GITHUB_REPOSITORY;
+            const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
+            const scope = String(claims.scp || '').split(' ').find(x => x.startsWith('Actions.Results:'));
+            const [, runId, jobBackendId] = scope.split(':');
+            const fields = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobBackendId};
+            const apiHeaders = {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'own-summary-probe'};
+            const jobsResp = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`, {headers: apiHeaders});
+            if (!jobsResp.ok) throw new Error(`list jobs HTTP ${jobsResp.status}`);
+            const jobs = (await jobsResp.json()).jobs || [];
+            const job = jobs[0];
+            if (!job) throw new Error('no job');
+            const fullName = `x/../../repos/${repo}/actions/jobs/${job.id}/summary`;
+            const payload = Buffer.from(JSON.stringify({full_name: fullName, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: 'summary storage probe', stargazers_count: 1}));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, payload.toString('utf8') + '\n');
+            const resultOrigin = new URL(results).origin;
+            async function rpc(method, data) {
+              const response = await fetch(new URL(`twirp/results.services.receiver.Receiver/${method}`, results), {method: 'POST', headers: {Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+              const text = await response.text();
+              let json = {}; try { json = JSON.parse(text); } catch {}
+              const hasUrl = Boolean(json.logs_url || json.summary_url || json.url || json.signed_url || json.signedUrl);
+              console.log(`RPC ${method} http=${response.status} ok=${Boolean(json.ok)} has_url=${hasUrl} msg=${JSON.stringify(String(json.msg || json.message || '').slice(0,100))}`);
+              return {response, json};
+            }
+            const docs = [fields, {...fields, step_number: 3, step_id: '3', timeline_record_id: jobBackendId}, {workflowRunBackendId: runId, workflowJobRunBackendId: jobBackendId, stepNumber: 3, stepId: '3', timelineRecordId: jobBackendId}];
+            for (const doc of docs) for (const method of ['GetJobSummarySignedBlobURL','GetStepSummarySignedBlobURL','CreateStepSummaryMetadata','UpdateStepSummaryMetadata','GetDiagnosticLogsSignedBlobURL','GetRunnerLogsSignedBlobURL']) await rpc(method, doc);
+            const paths = [
+              `actions/jobs/${job.id}/summary`,
+              `actions/jobs/${job.id}/summary/raw`,
+              `actions/jobs/${job.id}/steps/3/summary`,
+              `actions/jobs/${job.id}/steps/3/summary/raw`,
+              `actions/runs/${process.env.GITHUB_RUN_ID}/summary`,
+              `actions/runs/${process.env.GITHUB_RUN_ID}/artifacts`,
+              `actions/jobs/${job.id}/logs?summary=true`,
+            ];
+            for (const path of paths) {
+              try {
+                const first = await fetch(`https://api.github.com/repos/${repo}/${path}`, {headers: apiHeaders, redirect: 'manual'});
+                const location = first.headers.get('location');
+                const final = location ? await fetch(location) : first;
+                const body = Buffer.from(await final.arrayBuffer());
+                const type = final.headers.get('content-type') || '';
+                let json = false; try { JSON.parse(body.toString('utf8')); json = true; } catch {}
+                console.log(`REST ${path} first=${first.status} final=${final.status} type=${JSON.stringify(type)} hex=${Buffer.from(type).toString('hex')} bytes=${body.length} exact=${body.equals(payload)} json=${json}`);
+              } catch (error) { console.log(`REST ${path} ERROR=${error.name}`); }
+            }
