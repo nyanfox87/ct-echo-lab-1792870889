@@ -30,7 +30,7 @@ jobs:
             const [, runId, jobId] = scope.split(':');
             const rpcBase = new URL(resultsBase).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
             const source = `https://raw.githubusercontent.com/${repo}/main/migrate-copy-source.json`;
-            const expected = Buffer.from('{"probe":"migrate-copy","owner":"NeedYoutube"}');
+            const expected = Buffer.from('{"probe":"migrate-copy","owner":"NeedYoutube"}\n');
 
             function request(url, options = {}, body) {
               return new Promise((resolve, reject) => {
@@ -86,6 +86,10 @@ jobs:
               };
               if (blobContentType !== undefined) copyHeaders['x-ms-blob-content-type'] = blobContentType;
               const copied = await request(uploadUrl, {method: 'PUT', headers: copyHeaders});
+              const directSigned = await rpc('GetSignedArtifactURL', {...ids, name});
+              const directData = JSON.parse(directSigned.body);
+              const directUrl = directData.signed_url || directData.signedUrl || '';
+              const internal = directUrl ? await request(directUrl) : null;
               let rest = null, final = null, location = '';
               for (let attempt = 0; attempt < 12; attempt++) {
                 rest = await request(`https://api.github.com/repos/${repo}/actions/artifacts/${artifactId}/zip`, {
@@ -103,6 +107,11 @@ jobs:
                 label, artifactId, copyStatus: copied.status,
                 copyState: copied.headers['x-ms-copy-status'] || '',
                 copyError: copied.headers['x-ms-error-code'] || '',
+                internalRpcStatus: directSigned.status,
+                internalRsct: directUrl ? new URL(directUrl).searchParams.get('rsct') : null,
+                internalStatus: internal?.status,
+                internalTypeHex: Buffer.from(internal?.headers?.['content-type'] || '', 'latin1').toString('hex'),
+                internalBodyMatch: internal?.body.equals(expected),
                 restStatus: rest?.status,
                 rsct: location ? new URL(location).searchParams.get('rsct') : null,
                 finalStatus: final?.status,
