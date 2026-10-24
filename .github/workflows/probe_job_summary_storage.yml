@@ -1,6 +1,10 @@
 name: Probe Actions job summary storage
 on:
   workflow_dispatch:
+  push:
+    branches: [probe-step-summary-url]
+    paths:
+      - .github/workflows/probe_job_summary_storage.yml
 permissions:
   actions: read
   contents: read
