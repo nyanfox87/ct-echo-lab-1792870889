@@ -1,0 +1,114 @@
+name: Probe migrated artifact copy headers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v8
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const https = require('node:https');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsBase = process.env.ACTIONS_RESULTS_URL;
+            const repo = process.env.GITHUB_REPOSITORY;
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(x => x.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope missing');
+            const [, runId] = scope.split(':');
+            const rpcBase = new URL(resultsBase).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const source = `https://raw.githubusercontent.com/${repo}/main/migrate-copy-source.json`;
+            const expected = Buffer.from('{"probe":"migrate-copy","owner":"NeedYoutube"}');
+
+            function request(url, options = {}, body) {
+              return new Promise((resolve, reject) => {
+                const req = https.request(url, options, response => {
+                  const chunks = [];
+                  response.on('data', chunk => chunks.push(chunk));
+                  response.on('end', () => resolve({
+                    status: response.statusCode,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks),
+                  }));
+                });
+                req.on('error', reject);
+                req.setTimeout(20000, () => req.destroy(new Error('request timeout')));
+                if (body !== undefined) req.write(body);
+                req.end();
+              });
+            }
+            async function rpc(method, document) {
+              const body = Buffer.from(JSON.stringify(document));
+              return request(new URL(`/twirp/github.actions.results.api.v1.ArtifactService/${method}`, resultsBase), {
+                method: 'POST',
+                headers: {
+                  authorization: `Bearer ${token}`,
+                  accept: 'application/json',
+                  'content-type': 'application/json',
+                  'content-length': String(body.length),
+                },
+              }, body);
+            }
+            async function runCase(label, blobContentType) {
+              const name = `migrate-copy-${process.env.GITHUB_RUN_ID}-${label}`;
+              const created = await rpc('MigrateArtifact', {workflow_run_backend_id: runId, name});
+              if (created.status !== 200) throw new Error(`${label} migrate=${created.status} ${created.body.toString().slice(0, 120)}`);
+              const uploadUrl = JSON.parse(created.body).signed_upload_url;
+              if (!uploadUrl) throw new Error(`${label} missing signed upload URL`);
+              const placeholder = Buffer.from('{}');
+              const upload = await request(uploadUrl, {
+                method: 'PUT',
+                headers: {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/json', 'content-length': String(placeholder.length)},
+              }, placeholder);
+              if (upload.status !== 201) throw new Error(`${label} placeholder upload=${upload.status}`);
+              const finalized = await rpc('FinalizeMigratedArtifact', {workflow_run_backend_id: runId, name, size: String(placeholder.length)});
+              if (finalized.status !== 200) throw new Error(`${label} finalize=${finalized.status} ${finalized.body.toString().slice(0, 120)}`);
+              const artifactId = String(JSON.parse(finalized.body).artifact_id);
+              const copyHeaders = {
+                'x-ms-version': '2023-11-03',
+                'x-ms-copy-source': source,
+                'x-ms-blob-type': 'BlockBlob',
+                'content-length': '0',
+              };
+              if (blobContentType !== undefined) copyHeaders['x-ms-blob-content-type'] = blobContentType;
+              const copied = await request(uploadUrl, {method: 'PUT', headers: copyHeaders});
+              let rest = null, final = null, location = '';
+              for (let attempt = 0; attempt < 12; attempt++) {
+                rest = await request(`https://api.github.com/repos/${repo}/actions/artifacts/${artifactId}/zip`, {
+                  headers: {authorization: `Bearer ${process.env.GITHUB_TOKEN}`, accept: 'application/vnd.github.v3+json', 'user-agent': 'migrate-copy-probe'},
+                });
+                location = rest.headers.location || '';
+                if (location) {
+                  final = await request(location);
+                  if (final.status === 200) break;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              }
+              const type = final?.headers?.['content-type'] || '';
+              console.log('MIGRATE_COPY', JSON.stringify({
+                label, artifactId, copyStatus: copied.status,
+                copyState: copied.headers['x-ms-copy-status'] || '',
+                copyError: copied.headers['x-ms-error-code'] || '',
+                restStatus: rest?.status,
+                rsct: location ? new URL(location).searchParams.get('rsct') : null,
+                finalStatus: final?.status,
+                finalTypeHex: Buffer.from(type, 'latin1').toString('hex'),
+                bodyBytes: final?.body.length,
+                bodyMatch: final?.body.equals(expected),
+              }));
+            }
+
+            await runCase('source-default', undefined);
+            await runCase('explicit-json', 'application/json');
+            await runCase('explicit-nel', 'application/json\u0085');
