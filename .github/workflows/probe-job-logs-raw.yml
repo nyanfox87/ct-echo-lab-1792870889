@@ -44,7 +44,7 @@ jobs:
             }));
             const upload = () => fetch(signed.logs_url, {
               method: 'PUT',
-              headers: {'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/json\u0085'},
+              headers: {'x-ms-blob-type': 'BlockBlob', 'Content-Type': 'application/json\u0085', 'x-ms-blob-content-type': 'application/json\u0085'},
               body: payload,
             });
             const first = await upload();
