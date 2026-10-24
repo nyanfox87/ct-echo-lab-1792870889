@@ -1,6 +1,10 @@
 name: Probe job log metadata blob carrier
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/probe_job_log_metadata.yml
 permissions:
   actions: read
   contents: read
@@ -59,3 +63,5 @@ jobs:
             let isJson = false;
             try { JSON.parse(raw.toString('utf8')); isJson = true; } catch {}
             console.log(`LOG_RAW status=${final.status} type=${JSON.stringify(type)} typeHex=${Buffer.from(type).toString('hex')} bytes=${raw.length} exact=${raw.equals(payload)} json=${isJson} sha256=${require('node:crypto').createHash('sha256').update(raw).digest('hex')}`);
+
+
