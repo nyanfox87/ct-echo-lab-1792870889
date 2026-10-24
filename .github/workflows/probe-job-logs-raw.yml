@@ -52,7 +52,7 @@ jobs:
             await first.body?.cancel();
             for (let i = 0; i < 25; i++) {
               const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/jobs/${job.id}/logs`, {
-                headers: {Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
+                headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
                 redirect: 'manual',
               });
               const location = response.headers.get('location');
@@ -92,7 +92,7 @@ jobs:
             let location;
             for (let attempt = 0; attempt < 12; attempt++) {
               api = await fetch(apiUrl, {
-                headers: {Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
+                headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json', 'User-Agent': 'repo-cassette-own-probe'},
                 redirect: 'manual',
               });
               location = api.headers.get('location');
@@ -111,4 +111,3 @@ jobs:
             const bytes = Buffer.from(await download.arrayBuffer());
             const mime = download.headers.get('content-type') || '';
             console.log(`DOWNLOADED status=${download.status} mime=${JSON.stringify(mime)} mimeHex=${Buffer.from(mime, 'latin1').toString('hex')} size=${bytes.length} exactJson=${bytes.equals(expected)} sha256=${require('node:crypto').createHash('sha256').update(bytes).digest('hex')} first16=${bytes.subarray(0,16).toString('hex')}`);
-
