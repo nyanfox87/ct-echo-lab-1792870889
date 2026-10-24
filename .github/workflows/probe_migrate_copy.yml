@@ -20,13 +20,14 @@ jobs:
         with:
           script: |
             const https = require('node:https');
+            const {createHash} = require('node:crypto');
             const token = process.env.ACTIONS_RUNTIME_TOKEN;
             const resultsBase = process.env.ACTIONS_RESULTS_URL;
             const repo = process.env.GITHUB_REPOSITORY;
             const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
             const scope = claims.scp.split(' ').find(x => x.startsWith('Actions.Results:'));
             if (!scope) throw new Error('Actions.Results scope missing');
-            const [, runId] = scope.split(':');
+            const [, runId, jobId] = scope.split(':');
             const rpcBase = new URL(resultsBase).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
             const source = `https://raw.githubusercontent.com/${repo}/main/migrate-copy-source.json`;
             const expected = Buffer.from('{"probe":"migrate-copy","owner":"NeedYoutube"}');
@@ -62,8 +63,9 @@ jobs:
             }
             async function runCase(label, blobContentType) {
               const name = `migrate-copy-${process.env.GITHUB_RUN_ID}-${label}`;
-              const created = await rpc('MigrateArtifact', {workflow_run_backend_id: runId, name});
-              if (created.status !== 200) throw new Error(`${label} migrate=${created.status} ${created.body.toString().slice(0, 120)}`);
+              const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
+              const created = await rpc('CreateArtifact', {...ids, name, version: 7, mime_type: 'application/json'});
+              if (created.status !== 200) throw new Error(`${label} create=${created.status} ${created.body.toString().slice(0, 120)}`);
               const uploadUrl = JSON.parse(created.body).signed_upload_url;
               if (!uploadUrl) throw new Error(`${label} missing signed upload URL`);
               const placeholder = Buffer.from('{}');
@@ -72,7 +74,8 @@ jobs:
                 headers: {'x-ms-blob-type': 'BlockBlob', 'content-type': 'application/json', 'content-length': String(placeholder.length)},
               }, placeholder);
               if (upload.status !== 201) throw new Error(`${label} placeholder upload=${upload.status}`);
-              const finalized = await rpc('FinalizeMigratedArtifact', {workflow_run_backend_id: runId, name, size: String(placeholder.length)});
+              const hash = `sha256:${createHash('sha256').update(placeholder).digest('hex')}`;
+              const finalized = await rpc('FinalizeArtifact', {...ids, name, size: String(placeholder.length), hash});
               if (finalized.status !== 200) throw new Error(`${label} finalize=${finalized.status} ${finalized.body.toString().slice(0, 120)}`);
               const artifactId = String(JSON.parse(finalized.body).artifact_id);
               const copyHeaders = {
