@@ -21,7 +21,7 @@ async function create(name,body){
  return {id,url:c.signedUploadUrl};
 }
 async function list(){const r=await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}/artifacts?per_page=100`,{headers:{authorization:`Bearer ${ghToken}`,accept:'application/vnd.github+json','user-agent':'repo-cassette-cross-job-probe'}});return {status:r.status,data:await r.json().catch(()=>({}))};}
-async function inspect(id,expected){const r=await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${id}/zip`,{redirect:'manual',headers:{authorization:`Bearer ${ghToken}`,accept:'application/vnd.github+json','user-agent':'repo-cassette-cross-job-probe'}});const loc=r.headers.get('location');if(!loc)return{id,status:r.status};const u=new URL(loc),raw=await fetch(loc),body=Buffer.from(await raw.arrayBuffer());return{id,status:r.status,rsct:u.searchParams.get('rsct'),rawType:raw.headers.get('content-type'),exact:body.equals(expected),len:body.length};}
+async function inspect(id,pair){const r=await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${id}/zip`,{redirect:'manual',headers:{authorization:`Bearer ${ghToken}`,accept:'application/vnd.github+json','user-agent':'repo-cassette-cross-job-probe'}});const loc=r.headers.get('location');if(!loc)return{id,status:r.status};const u=new URL(loc),raw=await fetch(loc),body=Buffer.from(await raw.arrayBuffer());const expected=['v6','v7'].map(mode=>Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`,owner:{login:'cassette',avatar_url:'file:///proc/self/environ'},mode,pair})));let parsed=null;try{parsed=JSON.parse(body.toString('utf8'))}catch{}return{id,status:r.status,rsct:u.searchParams.get('rsct'),rawType:raw.headers.get('content-type'),exact:expected.some(x=>body.equals(x)),isJson:!!parsed,fullName:parsed?.full_name,len:body.length};}
 const signalName=`cross-signal-${runId}-${mode}`;
 const signalBody=Buffer.from(JSON.stringify({mode,signal:true}));
 const signal=await create(signalName,signalBody);
@@ -46,4 +46,5 @@ await delay(2000);
 const all=await list();
 const target=(all.data.artifacts||[]).filter(a=>names.includes(a.name));
 for(const name of names){const matches=target.filter(a=>a.name===name),observed=[];for(const a of matches)observed.push(await inspect(String(a.id),Number(name.split('-').at(-1))));console.log(JSON.stringify({mode,event:'inspect',name,items:matches.map(a=>({id:a.id,size:a.size_in_bytes})),observed}));}
+
 
