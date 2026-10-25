@@ -1,0 +1,4 @@
+name: Inspect artifact Content-Type controls
+runs:
+  using: node24
+  main: ../../../mime-control-probe.mjs
