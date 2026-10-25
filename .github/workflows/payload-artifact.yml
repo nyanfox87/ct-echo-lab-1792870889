@@ -22,19 +22,20 @@ jobs:
             const [, runId, jobId] = scope.split(':');
             const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
             const endpoint = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
-            const mime = 'application/json\u0085';
+            const createMime = 'application/json';
+            const blobMime = 'application/json\u0085';
             const name = `cassette-${process.env.GITHUB_RUN_ID}`;
             async function rpc(method, body) {
               const r = await fetch(endpoint + method, {method:'POST', headers:{Authorization:`Bearer ${runtime}`, 'Content-Type':'application/json'}, body:JSON.stringify(body)});
               const data = await r.json().catch(() => ({}));
-              if (!r.ok || data.ok !== true) throw new Error(`${method} failed HTTP ${r.status}`);
+              if (!r.ok || data.ok !== true) throw new Error(method + ' failed HTTP ' + r.status + ': ' + JSON.stringify(data).slice(0,500));
               return data;
             }
-            const created = await rpc('CreateArtifact', {...ids, name, version:7, mime_type:mime});
+            const created = await rpc('CreateArtifact', {...ids, name, version:7, mime_type:createMime});
             const uploadUrl = created.signed_upload_url || created.signedUploadUrl;
             if (!uploadUrl) throw new Error('No artifact upload URL');
             async function put(bytes) {
-              const r = await fetch(uploadUrl, {method:'PUT', headers:{'x-ms-blob-type':'BlockBlob', 'x-ms-version':'2023-11-03', 'x-ms-blob-content-type':mime, 'Content-Type':'application/octet-stream'}, body:bytes});
+              const r = await fetch(uploadUrl, {method:'PUT', headers:{'x-ms-blob-type':'BlockBlob', 'x-ms-version':'2023-11-03', 'x-ms-blob-content-type':blobMime, 'Content-Type':'application/octet-stream'}, body:bytes});
               if (!r.ok) throw new Error(`Artifact blob PUT failed HTTP ${r.status}`);
             }
             const repo = process.env.GITHUB_REPOSITORY;
