@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { BlobClient } from '@azure/storage-blob';
-import { internalArtifactTwirpClient } from '@actions/artifact/lib/internal/shared/artifact-twirp-client.js';
-import { getBackendIdsFromToken } from '@actions/artifact/lib/internal/shared/util.js';
-import { StringValue } from '@actions/artifact/lib/generated/index.js';
+import { internalArtifactTwirpClient } from './node_modules/@actions/artifact/lib/internal/shared/artifact-twirp-client.js';
+import { getBackendIdsFromToken } from './node_modules/@actions/artifact/lib/internal/shared/util.js';
+import { StringValue } from './node_modules/@actions/artifact/lib/generated/index.js';
 
 const runtimeToken = process.env.ACTIONS_RUNTIME_TOKEN;
 const ghToken = process.env.GH_TOKEN;
@@ -110,3 +110,4 @@ for (let start = 0; start < cases; start += parallel) {
   }
 }
 console.log(`SUMMARY ${JSON.stringify({ cases, completed: success })}`);
+
