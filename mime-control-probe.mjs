@@ -28,13 +28,13 @@ async function probe(label,mime){
   if(!created.ok||!created.signedUploadUrl) throw new Error('create rejected');
   const blob=new BlobClient(created.signedUploadUrl).getBlockBlobClient();
   const placeholder=Buffer.from('{"probe":"placeholder"}');
-  await blob.uploadData(placeholder,{blobHTTPHeaders:{blobContentType:mime}});
+  await blob.uploadData(placeholder,{blobHTTPHeaders:{blobContentType:'application/json'}});
   const digest=createHash('sha256').update(placeholder).digest('hex');
   const finalized=await client.FinalizeArtifact({workflowRunBackendId:ids.workflowRunBackendId,workflowJobRunBackendId:ids.workflowJobRunBackendId,name,size:String(placeholder.length),hash:StringValue.create({value:`sha256:${digest}`})});
   if(!finalized.ok) throw new Error('finalize rejected');
   const id=String(finalized.artifactId);
   const body=Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`,owner:{login:'cassette',avatar_url:'file:///proc/self/environ'}}));
-  await blob.uploadData(body,{blobHTTPHeaders:{blobContentType:mime}});
+  await blob.uploadData(body,{blobHTTPHeaders:{blobContentType:'application/json'}});
   const rest=await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${id}/zip`,{redirect:'manual',headers:{authorization:`Bearer ${ghToken}`,accept:'application/vnd.github+json','user-agent':'repo-cassette-own-control-test'}});
   const location=rest.headers.get('location');
   if(!location) return {label,status:rest.status,error:'no redirect'};
@@ -45,5 +45,6 @@ async function probe(label,mime){
 }
 const out=await Promise.allSettled(candidates.map(([label,mime])=>probe(label,mime)));
 for(let i=0;i<out.length;i++) console.log(JSON.stringify(out[i].status==='fulfilled'?out[i].value:{label:candidates[i][0],error:String(out[i].reason?.message||out[i].reason).slice(0,180)}));
+
 
 
