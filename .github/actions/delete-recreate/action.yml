@@ -1,0 +1,4 @@
+name: Inspect delete recreate artifact MIME
+runs:
+  using: node24
+  main: ../../../delete-recreate-probe.mjs
