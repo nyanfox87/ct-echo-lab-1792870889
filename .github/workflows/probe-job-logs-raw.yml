@@ -107,7 +107,19 @@ jobs:
               return;
             }
             await api.body?.cancel();
-            const download = await fetch(location);
-            const bytes = Buffer.from(await download.arrayBuffer());
-            const mime = download.headers.get('content-type') || '';
-            console.log(`DOWNLOADED status=${download.status} mime=${JSON.stringify(mime)} mimeHex=${Buffer.from(mime, 'latin1').toString('hex')} size=${bytes.length} exactJson=${bytes.equals(expected)} sha256=${require('node:crypto').createHash('sha256').update(bytes).digest('hex')} first16=${bytes.subarray(0,16).toString('hex')}`);
+            const signed = new URL(location);
+            console.log(`LOG-SAS original_rsct=${JSON.stringify(signed.searchParams.get('rsct'))} param_count=${signed.searchParams.size}`);
+            const variants = [
+              ['baseline', location],
+              ['duplicate_rsct_nel', `${location}&rsct=application%2Fjson%85`],
+              ['duplicate_rsct_json', `${location}&rsct=application%2Fjson`],
+              ['response_type_nel', `${location}&response-content-type=application%2Fjson%85`],
+              ['replace_rsct_nel', (() => { const u = new URL(location); u.searchParams.delete('rsct'); u.searchParams.append('rsct', 'application/json\u0085'); return u.toString(); })()],
+            ];
+            for (const [label, url] of variants) {
+              const response = await fetch(url, {redirect: 'manual'});
+              const mime = response.headers.get('content-type') || '';
+              const bytes = Buffer.from(await response.arrayBuffer());
+              console.log(`LOG-OVERRIDE ${JSON.stringify({label, status: response.status, mime, mimeHex: Buffer.from(mime, 'latin1').toString('hex'), error: response.headers.get('x-ms-error-code'), size: bytes.length, exactJson: bytes.equals(expected)})}`);
+            }
+
