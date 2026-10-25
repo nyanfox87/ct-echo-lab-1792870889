@@ -2,7 +2,7 @@ name: Repo Cassette delete and recreate artifact metadata
 on:
   workflow_dispatch:
   push:
-    branches: [probe-delete-recreate-mime-20261025]
+    branches: [probe-delete-recreate-mime-nyanfox-20261025]
     paths: [.github/workflows/probe_delete_recreate_mime.yml]
 permissions:
   actions: read
@@ -79,3 +79,4 @@ jobs:
             }
             await test('v7-delete-v6', 7, 'application/json', 6, 'application/json\u0085');
             await test('v6-delete-v7', 6, 'application/json\u0085', 7, 'application/json');
+
