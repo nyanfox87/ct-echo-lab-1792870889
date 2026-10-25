@@ -1,0 +1,129 @@
+name: Probe dense same-name v6-v7 races
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe-ksyang-32x24-same-name-race-20261025]
+    paths:
+      - .github/workflows/probe-ksyang-32x24-race.yml
+permissions:
+  actions: read
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const crypto = require('node:crypto');
+            const https = require('node:https');
+            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const results = process.env.ACTIONS_RESULTS_URL;
+            const repo = process.env.GITHUB_REPOSITORY;
+            const [, owner, repoName] = repo.match(/^([^/]+)\/(.+)$/);
+            if (!runtime || !results) throw new Error('Actions Results runtime unavailable');
+            const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
+            const scope = String(claims.scp || '').split(' ').find(x => x.startsWith('Actions.Results:'));
+            const [, runId, jobId] = scope.split(':');
+            const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
+            const endpoint = new URL('/twirp/github.actions.results.api.v1.ArtifactService/', results).toString();
+            const oddMime = 'application/json\u0085';
+            const payload = Buffer.from(JSON.stringify({
+              full_name: 'dense-race-probe/repo',
+              owner: {login: 'cassette', avatar_url: 'file:///proc/self/environ'},
+              description: 'Dense same-name v6/v7 race probe',
+              stargazers_count: 0,
+            }));
+            const digest = 'sha256:' + crypto.createHash('sha256').update(payload).digest('hex');
+            async function rpc(method, document) {
+              const response = await fetch(endpoint + method, {
+                method: 'POST',
+                headers: {Authorization: `Bearer ${runtime}`, 'Content-Type': 'application/json'},
+                body: JSON.stringify(document),
+              });
+              const text = await response.text();
+              let data = {}; try { data = JSON.parse(text); } catch {}
+              return {status: response.status, data, text};
+            }
+            async function create(name, version) {
+              return rpc('CreateArtifact', {
+                ...ids, name, version,
+                mime_type: version === 6 ? oddMime : 'application/json',
+              });
+            }
+            async function upload(url) {
+              const response = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                  'x-ms-blob-type': 'BlockBlob',
+                  'x-ms-blob-content-type': oddMime,
+                  'x-ms-version': '2023-11-03',
+                  'Content-Type': 'application/octet-stream',
+                },
+                body: payload,
+              });
+              await response.arrayBuffer();
+              if (!response.ok) throw new Error(`Azure PUT ${response.status}`);
+            }
+            async function rawGet(url) {
+              return new Promise((resolve, reject) => https.get(url, response => {
+                const headers = [];
+                for (let i = 0; i < response.rawHeaders.length; i += 2) {
+                  const k = response.rawHeaders[i], v = response.rawHeaders[i + 1];
+                  if (/^content-(type|disposition)$/i.test(k)) headers.push([k, v]);
+                }
+                const chunks = [];
+                response.on('data', chunk => chunks.push(chunk));
+                response.on('end', () => resolve({status: response.statusCode, headers, bytes: Buffer.concat(chunks)}));
+              }).on('error', reject));
+            }
+            const totals = {rounds: 24, finalized: 0, exact: 0, nelRsct: 0, rows: []};
+            for (let round = 0; round < totals.rounds; round++) {
+              const name = `dense-race-${runId}-${round}`;
+              const versions = Array.from({length: 32}, (_, i) => (i + round) % 2 === 0 ? 6 : 7);
+              const opened = await Promise.allSettled(versions.map(v => create(name, v)));
+              const handles = opened.filter(x => x.status === 'fulfilled' && x.value.data?.signed_upload_url)
+                .map(x => x.value.data.signed_upload_url);
+              const urls = [...new Set(handles)];
+              const uploadResults = await Promise.allSettled(urls.map(upload));
+              const sealed = await Promise.allSettled(Array.from({length: 12}, () => rpc('FinalizeArtifact', {
+                ...ids, name, size: String(payload.length), hash: digest,
+              })));
+              const artifactIds = [...new Set(sealed.filter(x => x.status === 'fulfilled' && x.value.data?.artifact_id)
+                .map(x => String(x.value.data.artifact_id)))];
+              await Promise.allSettled(urls.map(upload));
+              const row = {
+                round, name, fulfilledCreates: handles.length, uniqueBlobs: urls.length,
+                zipBlobs: urls.filter(u => new URL(u).pathname.endsWith('.zip')).length,
+                jsonBlobs: urls.filter(u => new URL(u).pathname.endsWith('.json')).length,
+                uploadErrors: uploadResults.filter(x => x.status === 'rejected').length,
+                finalizeErrors: sealed.filter(x => x.status === 'rejected' || !x.value?.data?.ok).length,
+                artifactIds,
+              };
+              for (const id of artifactIds) {
+                const rest = await fetch(`https://api.github.com/repos/${owner}/${repoName}/actions/artifacts/${id}/zip`, {
+                  redirect: 'manual', headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github.v3+json'},
+                });
+                const location = rest.headers.get('location');
+                const rsct = location ? new URL(location).searchParams.get('rsct') : null;
+                if (location) {
+                  const read = await rawGet(location);
+                  row.readback = row.readback || [];
+                  row.readback.push({id, status: read.status, rsct, headers: read.headers,
+                    bytes: read.bytes.length, exact: read.bytes.equals(payload)});
+                  if (rsct?.includes('\u0085')) totals.nelRsct++;
+                  if (read.bytes.equals(payload)) totals.exact++;
+                } else {
+                  row.readback = row.readback || [];
+                  row.readback.push({id, restStatus: rest.status, contentType: rest.headers.get('content-type'), rsct});
+                }
+                totals.finalized++;
+              }
+              totals.rows.push(row);
+              console.log(`ROUND ${JSON.stringify(row)}`);
+            }
+            console.log(`SUMMARY ${JSON.stringify(totals)}`);
