@@ -1,0 +1,19 @@
+name: Verify v6 v7 MIME race
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @actions/artifact@6.3.1 @azure/storage-blob@12.31.0
+      - name: Test artifact race and inspect actual REST response
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node v6-v7-race-probe.mjs
