@@ -1,0 +1,36 @@
+name: Verify cross-job v6 v7 artifact race
+on:
+  push:
+    branches:
+      - probe-cross-job-v6-v7-race-20261025
+jobs:
+  v6:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @actions/artifact@6.3.1 @azure/storage-blob@12.31.0
+      - uses: ./.github/actions/cross-job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBE_MODE: v6
+  v7:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @actions/artifact@6.3.1 @azure/storage-blob@12.31.0
+      - uses: ./.github/actions/cross-job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBE_MODE: v7
