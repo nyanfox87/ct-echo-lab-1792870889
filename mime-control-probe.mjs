@@ -24,7 +24,7 @@ const candidates=[
 ];
 async function probe(label,mime){
   const name=`mime-control-${stamp}-${label}`;
-  const created=await client.CreateArtifact({workflowRunBackendId:ids.workflowRunBackendId,workflowJobRunBackendId:ids.workflowJobRunBackendId,name,version:7,mimeType:StringValue.create({value:mime})});
+  const created=await client.CreateArtifact({workflowRunBackendId:ids.workflowRunBackendId,workflowJobRunBackendId:ids.workflowJobRunBackendId,name,version:6,mimeType:StringValue.create({value:mime})});
   if(!created.ok||!created.signedUploadUrl) throw new Error('create rejected');
   const blob=new BlobClient(created.signedUploadUrl).getBlockBlobClient();
   const placeholder=Buffer.from('{"probe":"placeholder"}');
@@ -45,4 +45,5 @@ async function probe(label,mime){
 }
 const out=await Promise.allSettled(candidates.map(([label,mime])=>probe(label,mime)));
 for(let i=0;i<out.length;i++) console.log(JSON.stringify(out[i].status==='fulfilled'?out[i].value:{label:candidates[i][0],error:String(out[i].reason?.message||out[i].reason).slice(0,180)}));
+
 
