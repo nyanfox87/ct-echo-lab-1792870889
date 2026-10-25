@@ -109,3 +109,15 @@ jobs:
             await run('mismatch-size', {size: String(body.length + 1)});
             await run('wrong-hash', {size: String(body.length), hash: `sha256:${'0'.repeat(64)}`});
             await run('invalid-hash', {size: String(body.length), hash: 'not-a-digest'});
+
+            const assetBase = 'https://api.github.com/repos/nyanfox87/ct-echo-lab/releases/assets/673149313';
+            for (const query of ['', '?raw=1', '?raw=true', '?download=1', '?response-content-type=application%2Fjson%85']) {
+              const r = await fetch(assetBase + query, {redirect: 'manual', headers: {
+                Accept: 'application/vnd.github.v3+json'
+              }});
+              const location = r.headers.get('location');
+              console.log('RELEASE_ASSET', JSON.stringify({query, status: r.status,
+                contentType: r.headers.get('content-type'), locationHost: location ? new URL(location).host : null}));
+              if (location) await inspect(location, 'release-asset' + query);
+              else await r.arrayBuffer();
+            }
