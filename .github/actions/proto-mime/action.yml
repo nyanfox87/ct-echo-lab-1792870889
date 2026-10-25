@@ -1,0 +1,4 @@
+name: Inspect protobuf artifact MIME
+runs:
+  using: node24
+  main: ../../../protobuf-mime-probe.mjs

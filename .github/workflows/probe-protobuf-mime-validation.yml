@@ -1,0 +1,21 @@
+name: Probe protobuf MIME validation
+on:
+  push:
+    branches:
+      - probe-protobuf-mime-validation-20261025
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @actions/artifact@6.3.1 @azure/storage-blob@12.31.0
+      - name: Send raw protobuf CreateArtifact requests
+        uses: ./.github/actions/proto-mime
+        env:
+          GH_TOKEN: ${{ github.token }}
