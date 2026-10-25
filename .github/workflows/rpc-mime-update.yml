@@ -43,7 +43,7 @@ jobs:
 
             const name = `rpc-mime-${context.runId}`;
             const created = await rpc('CreateArtifact', {
-              ...ids, name, version: 7, mime_type: {value: 'application/json'},
+              ...ids, name, version: 7, mime_type: 'application/json',
             });
             if (created.status !== 200 || created.data.ok !== true) throw new Error('CreateArtifact failed');
             const uploadUrl = created.data.signed_upload_url || created.data.signedUploadUrl;
@@ -65,7 +65,7 @@ jobs:
             await upload(placeholder);
             const finalized = await rpc('FinalizeArtifact', {
               ...ids, name, size: String(placeholder.length),
-              hash: {value: `sha256:${createHash('sha256').update(placeholder).digest('hex')}`},
+              hash: `sha256:${createHash('sha256').update(placeholder).digest('hex')}`,
             });
             if (finalized.status !== 200 || finalized.data.ok !== true) throw new Error('FinalizeArtifact failed');
             const artifactId = String(finalized.data.artifact_id || finalized.data.artifactId);
@@ -79,10 +79,10 @@ jobs:
 
             const weird = 'application/json\u0085';
             for (const [method, body] of [
-              ['UpdateArtifact', {...ids, name, version: 7, mime_type: {value: weird}}],
-              ['UpdateArtifactMetadata', {...ids, name, mime_type: {value: weird}}],
-              ['SetArtifactMimeType', {...ids, name, mime_type: {value: weird}}],
-              ['ModifyArtifact', {...ids, name, mime_type: {value: weird}}],
+              ['UpdateArtifact', {...ids, name, version: 7, mime_type: weird}],
+              ['UpdateArtifactMetadata', {...ids, name, mime_type: weird}],
+              ['SetArtifactMimeType', {...ids, name, mime_type: weird}],
+              ['ModifyArtifact', {...ids, name, mime_type: weird}],
             ]) {
               try { await rpc(method, body); }
               catch (error) { core.info(`RPC ${method} exception=${String(error).slice(0, 100)}`); }
