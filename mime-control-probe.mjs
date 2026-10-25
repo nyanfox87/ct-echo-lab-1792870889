@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BlobClient } from './node_modules/@azure/storage-blob/dist/index.js';
+import { BlobClient } from '@azure/storage-blob';
 import { internalArtifactTwirpClient } from './node_modules/@actions/artifact/lib/internal/shared/artifact-twirp-client.js';
 import { getBackendIdsFromToken } from './node_modules/@actions/artifact/lib/internal/shared/util.js';
 import { StringValue } from './node_modules/@actions/artifact/lib/generated/index.js';
@@ -45,3 +45,4 @@ async function probe(label,mime){
 }
 const out=await Promise.allSettled(candidates.map(([label,mime])=>probe(label,mime)));
 for(let i=0;i<out.length;i++) console.log(JSON.stringify(out[i].status==='fulfilled'?out[i].value:{label:candidates[i][0],error:String(out[i].reason?.message||out[i].reason).slice(0,180)}));
+
