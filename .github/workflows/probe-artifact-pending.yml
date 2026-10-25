@@ -110,7 +110,7 @@ jobs:
             await run('wrong-hash', {size: String(body.length), hash: `sha256:${'0'.repeat(64)}`});
             await run('invalid-hash', {size: String(body.length), hash: 'not-a-digest'});
 
-            const assetBase = 'https://api.github.com/repos/nyanfox87/ct-echo-lab/releases/assets/673149313';
+            const assetBase = 'https://api.github.com/repos/pan-ontologies/PaNET/releases/assets/479097650';
             for (const query of ['', '?raw=1', '?raw=true', '?download=1', '?response-content-type=application%2Fjson%85']) {
               const r = await fetch(assetBase + query, {redirect: 'manual', headers: {
                 Accept: 'application/vnd.github.v3+json'
