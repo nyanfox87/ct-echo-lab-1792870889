@@ -82,14 +82,18 @@ jobs:
               return prefix + 'a'.repeat(targetBytes - Buffer.byteLength(prefix));
             }
             const cases = [];
-            for (const size of [255, 256, 257, 299]) cases.push({label: `ascii-${size}`, prefix: asciiPrefix(size, `a${size}`)});
+            for (const size of [255, 256, 257, 299]) cases.push({label: `ascii-${size}`, size, kind: 'ascii'});
             for (const [label, ch] of [['utf8-eacute', 'é'], ['utf8-astral', '𝄞']]) {
-              for (const size of [255,256]) cases.push({label: `${label}-${size}`, prefix: utf8Prefix(size, label, ch)});
+              for (const size of [255,256]) cases.push({label: `${label}-${size}`, size, kind: 'utf8', character: ch});
             }
             for (const test of cases) {
               for (let reverse = 0; reverse < 2; reverse++) {
-                const nameX = test.prefix + 'X';
-                const nameY = test.prefix + 'Y';
+                const prefixLabel = `${test.label}-r${reverse}`;
+                const prefix = test.kind === 'ascii'
+                  ? asciiPrefix(test.size, prefixLabel)
+                  : utf8Prefix(test.size, prefixLabel, test.character);
+                const nameX = prefix + 'X';
+                const nameY = prefix + 'Y';
                 const pair = reverse ? [[nameY,7,safe],[nameX,6,weird]] : [[nameX,6,weird],[nameY,7,safe]];
                 try {
                   const created = await Promise.all(pair.map(([name,version,mime]) => create(name,version,mime)));
