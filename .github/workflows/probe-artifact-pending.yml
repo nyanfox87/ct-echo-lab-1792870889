@@ -121,3 +121,21 @@ jobs:
               if (location) await inspect(location, 'release-asset' + query);
               else await r.arrayBuffer();
             }
+
+            const contentsBase = `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/contents/data.json`;
+            for (const query of ['', '?raw=1', '?raw=true', '?download=1', '?media=raw', '?raw=1&response-content-type=application%2Fjson%85']) {
+              const r = await fetch(contentsBase + query, {redirect: 'manual', headers: {
+                Accept: 'application/vnd.github.v3+json'
+              }});
+              const location = r.headers.get('location');
+              const bytes = Buffer.from(await r.arrayBuffer());
+              let shape = 'non-json';
+              try {
+                const value = JSON.parse(bytes.toString('utf8'));
+                shape = value && typeof value === 'object' ? Object.keys(value).slice(0, 8).join('|') : typeof value;
+              } catch {}
+              console.log('CONTENTS_ROUTE', JSON.stringify({query, status: r.status,
+                contentType: r.headers.get('content-type'), locationHost: location ? new URL(location).host : null,
+                length: bytes.length, shape}));
+              if (location) await inspect(location, 'contents' + query);
+            }
