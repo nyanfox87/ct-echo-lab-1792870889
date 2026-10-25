@@ -51,15 +51,15 @@ jobs:
                 contentType: r.headers.get('content-type'), length: bytes.length,
                 prefixHex: bytes.subarray(0, 8).toString('hex'), sha256: digest}));
             }
-            async function rest(id, phase) {
-              const u = `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/actions/artifacts/${id}/zip`;
+            async function rest(id, phase, query = '') {
+              const u = `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/actions/artifacts/${id}/zip${query}`;
               const r = await fetch(u, {redirect: 'manual', headers: {
                 Authorization: `Bearer ${process.env.GH_TOKEN}`,
                 Accept: 'application/vnd.github.v3+json'
               }});
               const location = r.headers.get('location');
               const rsct = location ? new URL(location).searchParams.get('rsct') : null;
-              console.log('REST', JSON.stringify({phase, id, status: r.status, contentType: r.headers.get('content-type'), rsct}));
+              console.log('REST', JSON.stringify({phase, id, query, status: r.status, contentType: r.headers.get('content-type'), rsct}));
               await inspect(location, phase + '-redirect-body');
             }
             async function run(label, finalizeFields) {
@@ -92,6 +92,15 @@ jobs:
                 responseId, immediate, delayed}));
               for (const id of new Set([responseId, ...immediate.ids, ...delayed.ids].filter(Boolean))) {
                 await rest(id, 'after-finalize-' + label);
+                if (label === 'control') {
+                  const queries = [
+                    '?rsct=application%2Fjson%85',
+                    '?rsct=application%2Fjson%C2%85',
+                    '?response-content-type=application%2Fjson%85',
+                    '?rsct=application%2Fjson&rsct=application%2Fjson%85'
+                  ];
+                  for (const query of queries) await rest(id, 'query-override', query);
+                }
               }
             }
 
