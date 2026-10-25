@@ -45,4 +45,5 @@ for(let i=0;i<names.length;i++){
 await delay(2000);
 const all=await list();
 const target=(all.data.artifacts||[]).filter(a=>names.includes(a.name));
-for(const name of names){const matches=target.filter(a=>a.name===name),observed=[];for(const a of matches)observed.push(await inspect(String(a.id)));console.log(JSON.stringify({mode,event:'inspect',name,items:matches.map(a=>({id:a.id,size:a.size_in_bytes})),observed}));}
+for(const name of names){const matches=target.filter(a=>a.name===name),observed=[];for(const a of matches)observed.push(await inspect(String(a.id),Number(name.split('-').at(-1))));console.log(JSON.stringify({mode,event:'inspect',name,items:matches.map(a=>({id:a.id,size:a.size_in_bytes})),observed}));}
+
