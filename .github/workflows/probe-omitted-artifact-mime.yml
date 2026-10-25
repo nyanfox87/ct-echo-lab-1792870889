@@ -1,0 +1,21 @@
+name: Probe omitted artifact MIME
+on:
+  push:
+    branches:
+      - probe-omitted-artifact-mime-20261025
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @actions/artifact@6.3.1 @azure/storage-blob@12.31.0
+      - name: Test omitted, null, and empty MIME fields
+        uses: ./.github/actions/omit-mime
+        env:
+          GH_TOKEN: ${{ github.token }}
