@@ -1,0 +1,70 @@
+name: Probe v6 artifact name header edges
+on:
+  push:
+    branches: [probe-v6-name-header-edges-20261025]
+    paths:
+      - .github/workflows/probe-v6-name-header-edges.yml
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const crypto = require('node:crypto');
+            const repo = process.env.GITHUB_REPOSITORY;
+            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const results = process.env.ACTIONS_RESULTS_URL;
+            const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(x => x.startsWith('Actions.Results:'));
+            const [, runId, jobId] = scope.split(':');
+            const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
+            const base = new URL(results).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            async function rpc(method, data) {
+              const res = await fetch(base + method, {method:'POST', headers:{Authorization:`Bearer ${runtime}`,'Content-Type':'application/json'}, body:JSON.stringify(data)});
+              const text = await res.text();
+              let json={}; try { json=JSON.parse(text); } catch {}
+              return {status:res.status,json,text};
+            }
+            const cases = [
+              ['crlf', `v6-${runId}-a\r\nContent-Type: application/json\u0085.json`],
+              ['lf', `v6-${runId}-b\nContent-Type: application/json\u0085.json`],
+              ['cr', `v6-${runId}-c\rContent-Type: application/json\u0085.json`],
+              ['nul-crlf', `v6-${runId}-d\0\r\nContent-Type: application/json\u0085.json`],
+              ['nel', `v6-${runId}-e\u0085.json`],
+              ['encoded-crlf', `v6-${runId}-f%0d%0aContent-Type%3Aapplication%2Fjson%85.json`],
+            ];
+            for (const [label,name] of cases) {
+              try {
+                const created=await rpc('CreateArtifact',{...ids,name,version:6,mime_type:'\u0085application/json'});
+                const uploadUrl=created.json.signed_upload_url || created.json.signedUploadUrl;
+                if (!created.json.ok || !uploadUrl) { console.log('CASE',JSON.stringify({label,stage:'create',status:created.status,error:created.json.msg||created.text.slice(0,160)})); continue; }
+                const put=async bytes=>fetch(uploadUrl,{method:'PUT',headers:{'x-ms-blob-type':'BlockBlob','x-ms-blob-content-type':'application/json','Content-Type':'application/octet-stream'},body:bytes});
+                const placeholder=Buffer.from('{"p":true}');
+                let up=await put(placeholder);
+                if (!up.ok) { console.log('CASE',JSON.stringify({label,stage:'upload',status:up.status})); continue; }
+                const digest=crypto.createHash('sha256').update(placeholder).digest('hex');
+                const finalized=await rpc('FinalizeArtifact',{...ids,name,size:String(placeholder.length),hash:`sha256:${digest}`});
+                const id=String(finalized.json.artifact_id||finalized.json.artifactId||'');
+                if (!finalized.json.ok || !/^\d+$/.test(id)) { console.log('CASE',JSON.stringify({label,stage:'finalize',status:finalized.status,error:finalized.json.msg||finalized.text.slice(0,160)})); continue; }
+                const body=Buffer.from(JSON.stringify({probe:'v6-name-header',case:label,id}));
+                up=await put(body);
+                if (!up.ok) { console.log('CASE',JSON.stringify({label,stage:'overwrite',id,status:up.status})); continue; }
+                const path=`repos/x/../../repos/${repo}/actions/artifacts/${id}/zip`;
+                const first=await fetch(`https://api.github.com/${path}`,{redirect:'manual',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github.v3+json'}});
+                const location=first.headers.get('location');
+                if (!location) { console.log('CASE',JSON.stringify({label,id,first:first.status,location:false})); continue; }
+                const rsct=new URL(location).searchParams.get('rsct');
+                const final=await fetch(location);
+                const raw=Buffer.from(await final.arrayBuffer());
+                const ct=final.headers.get('content-type')||'';
+                console.log('CASE',JSON.stringify({label,id,first:first.status,rsct,final:final.status,contentType:ct,codepoints:[...ct].map(c=>c.codePointAt(0).toString(16)),nodeType:ct.split(',',1)[0].split(';',1)[0].trim().toLowerCase(),pyStripApprox:ct.replace(/^[\s\x1c-\x1f\x85]+|[\s\x1c-\x1f\x85]+$/g,'').split(',',1)[0].split(';',1)[0].toLowerCase(),length:raw.length,exact:raw.equals(body),sha256:crypto.createHash('sha256').update(raw).digest('hex')}));
+              } catch (error) { console.log('CASE',JSON.stringify({label,error:String(error).slice(0,240)})); }
+            }
