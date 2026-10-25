@@ -1,0 +1,4 @@
+name: Inspect artifact protocol versions
+runs:
+  using: node24
+  main: ../../../artifact-version-probe.mjs

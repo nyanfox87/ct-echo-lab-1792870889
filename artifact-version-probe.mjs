@@ -1,0 +1,32 @@
+import { createHash } from 'node:crypto';
+import { BlobClient } from '@azure/storage-blob';
+import { internalArtifactTwirpClient } from './node_modules/@actions/artifact/lib/internal/shared/artifact-twirp-client.js';
+import { getBackendIdsFromToken } from './node_modules/@actions/artifact/lib/internal/shared/util.js';
+import { StringValue } from './node_modules/@actions/artifact/lib/generated/index.js';
+const ghToken=process.env.GH_TOKEN;
+if(!process.env.ACTIONS_RUNTIME_TOKEN||!ghToken) throw new Error('runtime credentials unavailable');
+const ids=getBackendIdsFromToken(), client=internalArtifactTwirpClient();
+const repo=process.env.GITHUB_REPOSITORY, stamp=process.env.GITHUB_RUN_ID;
+const weird='\u0085application/json';
+const placeholder=Buffer.from('{"probe":"placeholder"}');
+const digest=createHash('sha256').update(placeholder).digest('hex');
+async function probe(version){
+ const name=`mime-version-${stamp}-${version}`;
+ const c=await client.CreateArtifact({workflowRunBackendId:ids.workflowRunBackendId,workflowJobRunBackendId:ids.workflowJobRunBackendId,name,version,mimeType:StringValue.create({value:weird})});
+ if(!c.ok||!c.signedUploadUrl) throw new Error('create failed');
+ const blob=new BlobClient(c.signedUploadUrl).getBlockBlobClient();
+ await blob.uploadData(placeholder,{blobHTTPHeaders:{blobContentType:'application/json'}});
+ const f=await client.FinalizeArtifact({workflowRunBackendId:ids.workflowRunBackendId,workflowJobRunBackendId:ids.workflowJobRunBackendId,name,size:String(placeholder.length),hash:StringValue.create({value:`sha256:${digest}`})});
+ if(!f.ok) throw new Error('finalize failed');
+ const id=String(f.artifactId);
+ const body=Buffer.from(JSON.stringify({full_name:`${repo}/actions/artifacts/${id}/zip`,owner:{login:'cassette',avatar_url:'file:///proc/self/environ'}}));
+ await blob.uploadData(body,{blobHTTPHeaders:{blobContentType:'application/json'}});
+ const r=await fetch(`https://api.github.com/repos/${repo}/actions/artifacts/${id}/zip`,{redirect:'manual',headers:{authorization:`Bearer ${ghToken}`,accept:'application/vnd.github+json','user-agent':'repo-cassette-own-version-probe'}});
+ const location=r.headers.get('location');
+ if(!location)return {version,status:r.status,error:'no redirect'};
+ const parsed=new URL(location), raw=await fetch(location), bytes=Buffer.from(await raw.arrayBuffer());
+ return {version,status:r.status,rsct:parsed.searchParams.get('rsct'),rawType:raw.headers.get('content-type'),exact:bytes.equals(body),bytes:bytes.length};
+}
+const versions=Array.from({length:11},(_,i)=>i);
+const results=await Promise.all(versions.map(async version=>{try{return await probe(version)}catch(e){return {version,error:String(e?.message||e).slice(0,220)}}}));
+for(const r of results)console.log(JSON.stringify(r));
