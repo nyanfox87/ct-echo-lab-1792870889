@@ -2,6 +2,9 @@ name: Probe artifact MIME metadata update RPC
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - probe-artifact-rpc-update-20261025
 
 permissions:
   actions: read
