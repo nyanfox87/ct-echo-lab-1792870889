@@ -1,0 +1,4 @@
+name: Inspect sequential artifact versions
+runs:
+  using: node24
+  main: ../../../sequential-version-probe.mjs
