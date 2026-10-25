@@ -42,6 +42,15 @@ jobs:
                 .filter(x => x.name === name)
                 .map(x => String(x.database_id || x.databaseId || '')).filter(Boolean)};
             }
+            async function inspect(url, phase) {
+              if (!url) return;
+              const r = await fetch(url);
+              const bytes = Buffer.from(await r.arrayBuffer());
+              const digest = require('crypto').createHash('sha256').update(bytes).digest('hex');
+              console.log('BODY', JSON.stringify({phase, status: r.status,
+                contentType: r.headers.get('content-type'), length: bytes.length,
+                prefixHex: bytes.subarray(0, 8).toString('hex'), sha256: digest}));
+            }
             async function rest(id, phase) {
               const u = `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/actions/artifacts/${id}/zip`;
               const r = await fetch(u, {redirect: 'manual', headers: {
@@ -51,6 +60,7 @@ jobs:
               const location = r.headers.get('location');
               const rsct = location ? new URL(location).searchParams.get('rsct') : null;
               console.log('REST', JSON.stringify({phase, id, status: r.status, contentType: r.headers.get('content-type'), rsct}));
+              await inspect(location, phase + '-redirect-body');
             }
             async function run(label, finalizeFields) {
               const name = `pending-${context.runId}-${label}`;
@@ -69,6 +79,7 @@ jobs:
               console.log('BEFORE_FINALIZE', JSON.stringify({label, listStatus: before.status,
                 ids: before.ids, signedStatus: signed.status,
                 signedRsct: signedUrl ? new URL(signedUrl).searchParams.get('rsct') : null}));
+              await inspect(signedUrl, label + '-signed-before-finalize');
               for (const id of before.ids) await rest(id, 'before-finalize');
 
               const finalized = await twirp('FinalizeArtifact', {...ids, name, ...finalizeFields});
