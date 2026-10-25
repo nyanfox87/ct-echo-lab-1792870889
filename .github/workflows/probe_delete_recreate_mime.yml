@@ -1,0 +1,81 @@
+name: Repo Cassette delete and recreate artifact metadata
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe-delete-recreate-mime-20261025]
+    paths: [.github/workflows/probe_delete_recreate_mime.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete finalized artifact then recreate same name with another version
+        uses: actions/github-script@v8
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            const {createHash} = require('node:crypto');
+            const token = process.env.ACTIONS_RUNTIME_TOKEN;
+            const resultsUrl = process.env.ACTIONS_RESULTS_URL;
+            if (!token || !resultsUrl) throw new Error('Actions runtime artifact credentials unavailable');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            const scope = claims.scp.split(' ').find(value => value.startsWith('Actions.Results:'));
+            if (!scope) throw new Error('Actions.Results scope missing');
+            const [, runBackendId, jobBackendId] = scope.split(':');
+            const service = new URL(resultsUrl).origin + '/twirp/github.actions.results.api.v1.ArtifactService/';
+            const repo = process.env.GITHUB_REPOSITORY;
+            const [owner, repoName] = repo.split('/');
+            const runId = process.env.GITHUB_RUN_ID;
+            async function rpc(method, body) {
+              const response = await fetch(service + method, {method: 'POST', headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+              return {status: response.status, data: await response.json().catch(() => ({}))};
+            }
+            async function create(name, version, mime) {
+              const result = await rpc('CreateArtifact', {workflow_run_backend_id: runBackendId, workflow_job_run_backend_id: jobBackendId, name, version, mime_type: mime});
+              return {status: result.status, ok: result.data.ok, reason: String(result.data.msg || result.data.code || '').slice(0, 100), upload: result.data.signed_upload_url || result.data.signedUploadUrl || null};
+            }
+            async function put(url, bytes) {
+              if (!url) return {ok: false, status: 0};
+              const response = await fetch(url, {method: 'PUT', headers: {'x-ms-blob-type': 'BlockBlob', 'x-ms-version': '2023-11-03', 'Content-Type': 'application/octet-stream'}, body: bytes});
+              return {ok: response.ok, status: response.status};
+            }
+            async function finalize(name, bytes) {
+              const hash = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+              const result = await rpc('FinalizeArtifact', {workflow_run_backend_id: runBackendId, workflow_job_run_backend_id: jobBackendId, name, size: String(bytes.length), hash});
+              return {status: result.status, ok: result.data.ok, reason: String(result.data.msg || result.data.code || '').slice(0, 120), id: String(result.data.artifact_id || result.data.artifactId || '')};
+            }
+            async function inspect(id, expected) {
+              if (!id) return {error: 'missing ID'};
+              const response = await fetch(`https://api.github.com/repos/${owner}/${repoName}/actions/artifacts/${id}/zip`, {headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json'}, redirect: 'manual'});
+              const location = response.headers.get('location');
+              if (!location) return {apiStatus: response.status, body: (await response.text()).slice(0, 80)};
+              const signed = new URL(location);
+              const downloaded = await fetch(location);
+              const bytes = Buffer.from(await downloaded.arrayBuffer());
+              const type = downloaded.headers.get('content-type') || '';
+              return {apiStatus: response.status, downloadStatus: downloaded.status, contentType: type, contentTypeHex: Buffer.from(type, 'latin1').toString('hex'), rsct: signed.searchParams.getAll('rsct'), bytes: bytes.length, exact: bytes.equals(expected), sha256: createHash('sha256').update(bytes).digest('hex')};
+            }
+            async function test(label, oldVersion, oldMime, newVersion, newMime) {
+              const name = `${runId}-${label}`;
+              const placeholder = Buffer.from('{}');
+              const oldCreate = await create(name, oldVersion, oldMime);
+              const oldUpload = await put(oldCreate.upload, placeholder);
+              const oldFinalize = await finalize(name, placeholder);
+              const deleted = await rpc('DeleteArtifact', {workflow_run_backend_id: runBackendId, workflow_job_run_backend_id: jobBackendId, name});
+              const newCreate = await create(name, newVersion, newMime);
+              const newUpload = await put(newCreate.upload, placeholder);
+              const newFinalize = await finalize(name, placeholder);
+              const oldPayload = Buffer.from(JSON.stringify({full_name: `x/../../repos/${repo}/actions/artifacts/${oldFinalize.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: `${label}-old`}));
+              const newPayload = Buffer.from(JSON.stringify({full_name: `x/../../repos/${repo}/actions/artifacts/${newFinalize.id}/zip`, owner: {login: 'probe', avatar_url: 'file:///proc/self/environ'}, description: `${label}-new`}));
+              const oldOverwrite = await put(oldCreate.upload, oldPayload);
+              const newOverwrite = await put(newCreate.upload, newPayload);
+              const oldRead = await inspect(oldFinalize.id, oldPayload);
+              const newRead = await inspect(newFinalize.id, newPayload);
+              core.info(`DELETE_RECREATE ${JSON.stringify({label, oldVersion, oldMime, oldCreate: {...oldCreate, upload: undefined}, oldUpload, oldFinalize, deleted: {status: deleted.status, ok: deleted.data.ok, id: String(deleted.data.artifact_id || deleted.data.artifactId || ''), reason: String(deleted.data.msg || deleted.data.code || '').slice(0,100)}, newVersion, newMime, newCreate: {...newCreate, upload: undefined}, newUpload, newFinalize, oldOverwrite, newOverwrite, oldRead, newRead})}`);
+            }
+            await test('v7-delete-v6', 7, 'application/json', 6, 'application/json\u0085');
+            await test('v6-delete-v7', 6, 'application/json\u0085', 7, 'application/json');
