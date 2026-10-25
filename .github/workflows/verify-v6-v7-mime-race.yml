@@ -1,6 +1,9 @@
 name: Verify v6 v7 MIME race
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - probe-v6-v7-mime-race-20261025
 jobs:
   probe:
     runs-on: ubuntu-latest
